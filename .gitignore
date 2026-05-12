@@ -1,0 +1,61 @@
+# Dependencies and AdonisJS build
+node_modules
+build
+tmp
+
+# Secrets
+.env
+.env.local
+.env.production.local
+.env.development.local
+
+# Frontend assets compiled code
+public/assets
+
+# Build tools specific
+npm-debug.log
+yarn-error.log
+
+# Editors specific
+.fleet
+.idea
+.vscode
+
+# Platform specific
+.DS_Store
+
+firebase-credentials.json
+
+# Logs
+logs
+*.log
+
+# Cache
+.cache
+
+# Coverage
+coverage
+
+# Runtime
+*.pid
+
+# Uploads temp
+uploads/tmp
+
+# OS
+Thumbs.db
+desktop.ini
+
+# SSL / certificates
+*.pem
+*.key
+*.crt
+
+# Firebase
+serviceAccountKey.json
+
+# Docker
+docker-data
+
+# PM2
+.pm2

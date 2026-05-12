@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diagrama de Flujo y Relaciones de la Aplicación</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 25px 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }
+        h1, h2, h3 {
+            color: #1a253c;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        p, li {
+            font-size: 16px;
+            color: #555;
+        }
+        strong {
+            color: #0056b3;
+        }
+        .mermaid {
+            text-align: center;
+            background-color: #fdfdfd;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            margin-bottom: 40px;
+            overflow: auto;
+        }
+        .module-description {
+            background-color: #e7f3ff;
+            border-left: 5px solid #007bff;
+            padding: 15px 20px;
+            margin-bottom: 25px;
+            border-radius: 5px;
+        }
+        .note {
+            font-style: italic;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>📈 Diagrama de Flujo y Arquitectura de Datos</h1>
+        <p class="module-description">
+            Este documento describe el flujo completo y la arquitectura de la base de datos de la aplicación. Está diseñado para ser una guía clara y escalable, permitiendo a cualquier persona comprender cómo interactúan los diferentes componentes del sistema, desde la configuración inicial de una empresa hasta la generación de reportes diarios.
+        </p>
+
+        <h2>Módulo 1: Configuración Central y Entidades Principales (El Núcleo)</h2>
+        <div class="module-description">
+            <p>Todo comienza aquí. Este es el corazón del sistema multi-tenant. Una <strong>Company</strong> es la entidad raíz que agrupa toda la información. Cada compañía puede tener múltiples <strong>Locations</strong> (sucursales), y a su vez, múltiples <strong>Users</strong> con diferentes roles. Las tablas <strong>Company Settings</strong> y <strong>Payment Methods</strong> permiten una alta personalización para cada negocio.</p>
+            <p class="note"><strong>Escalabilidad:</strong> La separación por <code>company_id</code> en casi todas las tablas es la clave para un modelo SaaS (Software as a Service), permitiendo que miles de negocios coexistan en la misma base de datos de forma segura y aislada.</p>
+        </div>
+        <div class="mermaid">
+erDiagram
+    companies {
+        integer id PK "ID único de la empresa"
+        varchar business_code UK "Código único del negocio"
+        varchar name "Nombre de la empresa"
+        enum subscription_plan "Plan de suscripción"
+    }
+
+    locations {
+        integer id PK "ID único de la sucursal"
+        integer company_id FK "ID de la empresa"
+        varchar name "Nombre de la sucursal"
+        boolean is_main "Indica si es la principal"
+    }
+
+    users {
+        integer id PK "ID único del usuario"
+        integer company_id FK "ID de la empresa"
+        integer location_id FK "ID de la sucursal (opcional)"
+        varchar username UK "Nombre de usuario"
+        varchar full_name "Nombre completo"
+        enum role "Rol del usuario (admin, manager, etc.)"
+    }
+
+    company_settings {
+        integer id PK
+        integer company_id FK
+        varchar setting_key UK "Clave de configuración"
+        text setting_value "Valor de configuración"
+    }
+    
+    payment_methods {
+        integer id PK
+        integer company_id FK
+        varchar name "Nombre del método (Efectivo, Visa)"
+        enum type "Tipo (cash, card, etc.)"
+    }
+
+    companies ||--o{ locations : "tiene"
+    companies ||--o{ users : "tiene"
+    companies ||--o{ company_settings : "configura"
+    companies ||--o{ payment_methods : "define"
+    locations ||--o{ users : "asigna"
+        </div>
+
+        <h2>Módulo 2: Gestión de Operaciones y Menú (El Inventario)</h2>
+        <div class="module-description">
+            <p>Este módulo define lo que un negocio vende y cómo está organizado su espacio físico. Una <strong>Company</strong> define sus <strong>Categories</strong> (Ej: Bebidas, Entradas) y dentro de ellas, sus <strong>Products</strong>. También se configuran las <strong>Tables</strong> y <strong>Cash Registers</strong> (cajas registradoras) disponibles en cada <strong>Location</strong>.</p>
+             <p class="note"><strong>Escalabilidad:</strong> Al desacoplar productos y categorías del resto del sistema, es fácil implementar futuras funcionalidades como gestión de inventario, combos, o modificadores de productos sin alterar el flujo de órdenes.</p>
+        </div>
+        <div class="mermaid">
+erDiagram
+    companies ||--o{ categories : "crea"
+    companies ||--o{ products : "vende"
+    companies ||--o{ tables : "organiza"
+    companies ||--o{ cash_registers : "instala"
+    
+    locations ||--o{ tables : "contiene"
+    locations ||--o{ cash_registers : "tiene en"
+    
+    categories ||--o{ products : "agrupa"
+
+    categories {
+        integer id PK
+        integer company_id FK
+        varchar name "Nombre de la categoría"
+    }
+    products {
+        integer id PK
+        integer category_id FK
+        varchar name "Nombre del producto"
+        decimal price "Precio de venta"
+    }
+    tables {
+        integer id PK
+        integer location_id FK
+        varchar number "Número o nombre de la mesa"
+        integer capacity "Capacidad de la mesa"
+    }
+    cash_registers {
+        integer id PK
+        integer location_id FK
+        varchar name "Nombre de la caja"
+    }
+        </div>
+
+        <h2>Módulo 3: Flujo de Órdenes y Pagos (El Corazón de la Operación)</h2>
+        <div class="module-description">
+            <p>Este es el flujo principal y más dinámico. Un <strong>User</strong> (mesero) crea una <strong>Order</strong> asociada a una <strong>Table</strong>. La orden contiene múltiples <strong>Order Items</strong>, que son los <strong>Products</strong> solicitados. El estado de la orden (<code>status</code>) y de cada item (<code>kitchen_status</code>) cambia a lo largo del proceso. Finalmente, la orden se paga a través de uno o más <strong>Order Payments</strong>.</p>
+             <p class="note"><strong>Escalabilidad:</strong> La separación de `orders`, `order_items` y `order_payments` permite manejar escenarios complejos como cuentas divididas, pagos parciales con diferentes métodos y envío de items a cocina en momentos distintos.</p>
+        </div>
+        <div class="mermaid">
+erDiagram
+    users ||--o{ orders : "toma"
+    tables ||--o{ orders : "se asocia a"
+    products ||--|{ order_items : "es un"
+    orders ||--o{ order_items : "contiene"
+    orders ||--o{ order_payments : "se paga con"
+    payment_methods ||--o{ order_payments : "usa"
+
+    orders {
+        integer id PK
+        integer location_id FK
+        integer table_id FK
+        integer waiter_id FK
+        varchar order_number UK "Número de la orden"
+        enum status "Estado (pending, paid, etc.)"
+        decimal total_amount "Monto total"
+    }
+    order_items {
+        integer id PK
+        integer order_id FK
+        integer product_id FK
+        integer quantity "Cantidad"
+        decimal total_price "Precio total"
+        enum kitchen_status "Estado en cocina"
+    }
+    order_payments {
+        integer id PK
+        integer order_id FK
+        integer payment_method_id FK
+        decimal amount "Monto del pago"
+    }
+        </div>
+
+        <h2>Módulo 4: Gestión de Caja (El Flujo de Dinero)</h2>
+        <div class="module-description">
+            <p>Este flujo es crucial para el control financiero. Un <strong>User</strong> (cajero) inicia una <strong>Cash Register Session</strong> al comenzar su turno, registrando un saldo de apertura. Cada pago en efectivo (y otros movimientos) se registra como un <strong>Cash Movement</strong> dentro de esa sesión. Cuando se realiza un <strong>Order Payment</strong> en efectivo, éste se vincula a la sesión de caja activa y genera su correspondiente movimiento de dinero.</p>
+             <p class="note"><strong>Escalabilidad:</strong> Este modelo permite auditorías precisas, manejo de múltiples cajeros en una misma caja (en turnos distintos) y la fácil incorporación de otros tipos de movimientos de dinero (depósitos, retiros, gastos).</p>
+        </div>
+        <div class="mermaid">
+erDiagram
+    users ||--o{ cash_register_sessions : "inicia/cierra"
+    cash_registers ||--o{ cash_register_sessions : "tiene"
+    cash_register_sessions ||--o{ cash_movements : "registra"
+    cash_register_sessions ||--o{ order_payments : "procesa"
+    orders ||--o{ cash_movements : "puede generar"
+
+    cash_register_sessions {
+        integer id PK
+        integer cash_register_id FK
+        integer user_id FK
+        decimal opening_balance "Saldo inicial"
+        decimal closing_balance "Saldo de cierre"
+        enum status "Estado (open, closed)"
+    }
+
+    cash_movements {
+        integer id PK
+        integer cash_register_session_id FK
+        integer order_id FK "Opcional"
+        enum movement_type "Tipo (sale, withdrawal)"
+        decimal amount "Monto"
+    }
+    
+    order_payments {
+        integer id PK
+        integer order_id FK
+        integer cash_register_session_id FK "Si es en efectivo"
+        decimal amount "Monto"
+    }
+        </div>
+
+        <h2>Módulo 5: Auditoría, Reportes y Notificaciones (La Inteligencia de Negocio)</h2>
+        <div class="module-description">
+            <p>Estas tablas no participan en el flujo de venta en tiempo real, pero son vitales para la auditoría, el análisis y la comunicación. <strong>Activity Logs</strong> registra acciones importantes de los usuarios. <strong>Order Status History</strong> guarda cada cambio de estado de una orden. <strong>Daily Summaries</strong> pre-calcula métricas clave para reportes rápidos y eficientes. Finalmente, <strong>Notifications</strong> permite enviar mensajes a los usuarios.</p>
+             <p class="note"><strong>Escalabilidad:</strong> La tabla `daily_summaries` es una técnica de optimización clave. Evita tener que calcular métricas pesadas sobre la tabla de órdenes cada vez que se consulta un reporte, lo que garantiza que el sistema siga siendo rápido incluso con millones de órdenes.</p>
+        </div>
+        <div class="mermaid">
+erDiagram
+    companies ||--o{ activity_logs : "genera"
+    companies ||--o{ daily_summaries : "consolida"
+    companies ||--o{ notifications : "envía"
+    users ||--o{ activity_logs : "realiza"
+    users ||--o{ order_status_history : "cambia"
+    orders ||--o{ order_status_history : "tiene historial de"
+
+    activity_logs {
+        integer id PK
+        integer company_id FK
+        integer user_id FK
+        varchar action "Acción realizada"
+        json details "Detalles en JSON"
+    }
+
+    order_status_history {
+        integer id PK
+        integer order_id FK
+        varchar new_status "Nuevo estado"
+        integer changed_by FK "Usuario que cambió"
+    }
+    
+    daily_summaries {
+        integer id PK
+        integer location_id FK
+        date summary_date "Fecha del resumen"
+        decimal total_revenue "Ingresos totales"
+        integer total_orders "Órdenes totales"
+    }
+
+    notifications {
+        integer id PK
+        integer user_id FK "Destinatario"
+        varchar title "Título"
+        text message "Mensaje"
+    }
+        </div>
+
+        <h2>Diagrama General Completo</h2>
+        <div class="module-description">
+            <p>A continuación se muestra el diagrama completo con todas las tablas y sus relaciones. Este gráfico es denso, pero sirve como referencia final para entender todas las conexiones del sistema. Se recomienda analizar los módulos anteriores primero para una mejor comprensión.</p>
+        </div>
+        <div class="mermaid">
+erDiagram
+    companies {
+        integer id PK
+        varchar business_code UK
+        varchar name
+    }
+    locations {
+        integer id PK
+        integer company_id FK
+        varchar name
+    }
+    users {
+        integer id PK
+        integer company_id FK
+        integer location_id FK
+        varchar username UK
+        enum role
+    }
+    cash_registers {
+        integer id PK
+        integer company_id FK
+        integer location_id FK
+        varchar name
+    }
+    cash_register_sessions {
+        integer id PK
+        integer cash_register_id FK
+        integer user_id FK
+        enum status
+    }
+    cash_movements {
+        integer id PK
+        integer cash_register_session_id FK
+        integer order_id FK
+        enum movement_type
+    }
+    categories {
+        integer id PK
+        integer company_id FK
+        varchar name
+    }
+    products {
+        integer id PK
+        integer company_id FK
+        integer category_id FK
+        varchar name
+        decimal price
+    }
+    tables {
+        integer id PK
+        integer company_id FK
+        integer location_id FK
+        varchar number
+    }
+    payment_methods {
+        integer id PK
+        integer company_id FK
+        varchar name
+    }
+    orders {
+        integer id PK
+        integer company_id FK
+        integer location_id FK
+        integer table_id FK
+        integer waiter_id FK
+        enum status
+    }
+    order_items {
+        integer id PK
+        integer order_id FK
+        integer product_id FK
+        integer quantity
+    }
+    order_payments {
+        integer id PK
+        integer order_id FK
+        integer payment_method_id FK
+        integer cash_register_session_id FK
+    }
+    order_status_history {
+        integer id PK
+        integer order_id FK
+        integer changed_by FK
+        varchar new_status
+    }
+    activity_logs {
+        integer id PK
+        integer company_id FK
+        integer user_id FK
+        varchar action
+    }
+    company_settings {
+        integer id PK
+        integer company_id FK
+        varchar setting_key
+    }
+    daily_summaries {
+        integer id PK
+        integer company_id FK
+        integer location_id FK
+        date summary_date
+    }
+    notifications {
+        integer id PK
+        integer company_id FK
+        integer user_id FK
+        varchar title
+    }
+
+    companies ||--o{ locations : has
+    companies ||--o{ users : has
+    companies ||--o{ cash_registers : owns
+    companies ||--o{ categories : defines
+    companies ||--o{ products : sells
+    companies ||--o{ tables : has
+    companies ||--o{ payment_methods : accepts
+    companies ||--o{ orders : receives
+    companies ||--o{ activity_logs : generates
+    companies ||--o{ company_settings : has
+    companies ||--o{ daily_summaries : summarizes
+    companies ||--o{ notifications : sends
+
+    locations ||--o{ users : employs
+    locations ||--o{ cash_registers : contains
+    locations ||--o{ tables : has
+    locations ||--o{ orders : processes
+    locations ||--o{ daily_summaries : for
+
+    users ||--o{ cash_register_sessions : manages
+    users ||--o{ orders : takes
+    users ||--o{ order_payments : processes
+    users ||--o{ order_status_history : changes
+    users ||--o{ activity_logs : performs
+    users ||--o{ notifications : receives
+
+    cash_registers ||--o{ cash_register_sessions : has
+    cash_register_sessions ||--o{ cash_movements : records
+    cash_register_sessions ||--o{ order_payments : linked_to
+
+    categories ||--o{ products : contains
+    products ||--|{ order_items : is
+
+    tables ||--o{ orders : for
+    
+    orders ||--o{ order_items : contains
+    orders ||--o{ order_payments : has
+    orders ||--o{ order_status_history : has
+    orders ||--o{ cash_movements : can_generate
+    
+    payment_methods ||--o{ order_payments : used_by
+        </div>
+
+    </div>
+
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true });
+    </script>
+
+</body>
+</html>
