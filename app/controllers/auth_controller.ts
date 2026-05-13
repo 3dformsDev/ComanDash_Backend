@@ -103,7 +103,7 @@ export default class AuthController {
 
       // Generar token nuevo
       const token = await User.accessTokens.create(user, ['*'], {
-        expiresIn: '7 days',
+        expiresIn: '4 hours',
       })
 
       // Preparar permisos para la respuesta
@@ -250,7 +250,7 @@ export default class AuthController {
 
       // Generar token
       const token = await User.accessTokens.create(user, ['*'], {
-        expiresIn: '7 days',
+        expiresIn: '4 hours',
       })
 
       // Preparar permisos para la respuesta
@@ -456,7 +456,7 @@ export default class AuthController {
 
       // Crea un nuevo token.
       const token = await User.accessTokens.create(user, ['*'], {
-        expiresIn: '7 days',
+        expiresIn: '4 hours',
       })
 
       // Devuelve el nuevo token y los datos del usuario, igual que en el login.
