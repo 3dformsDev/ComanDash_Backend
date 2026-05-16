@@ -24,6 +24,7 @@ import CashMovementsController from '#controllers/cash_movements_controller';
 import OrderPaymentsController from '#controllers/order_payments_controller';
 import NotificationsController from '#controllers/notifications_controller';
 import ReportsController from '#controllers/reports_controller';
+import ReceiptsController from '#controllers/receipts_controller';
 
 router.get('/', async () => {
   return {
@@ -151,6 +152,17 @@ router.group(() => {
     .middleware('update', [
       middleware.ensureCashRegisterIsOpen()
     ])
+
+    router.get(
+      'receipts/:orderId/pdf',
+      [ReceiptsController, 'download']
+    )
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+      middleware.ensureCashRegisterIsOpen(),
+    ])
+
 
   router.resource('cashregisters', CashRegistersController)
     .middleware('*', [
