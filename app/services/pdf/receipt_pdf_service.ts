@@ -1,10 +1,8 @@
-import PDFDocument from 'pdfkit'
-import Order from '#models/order'
+import PDFDocument from "pdfkit";
+import Order from "#models/order";
 
 export default class ReceiptPdfService {
-
   public static async generate(order: Order) {
-
     const doc = new PDFDocument({
       size: [226, 800],
       margins: {
@@ -13,165 +11,175 @@ export default class ReceiptPdfService {
         left: 15,
         right: 15,
       },
-    })
+    });
 
-    const buffers: Buffer[] = []
+    const buffers: Buffer[] = [];
 
-    doc.on('data', buffers.push.bind(buffers))
+    doc.on("data", buffers.push.bind(buffers));
 
     return new Promise<Buffer>((resolve, reject) => {
+      doc.on("end", () => {
+        resolve(Buffer.concat(buffers));
+      });
 
-      doc.on('end', () => {
-        resolve(Buffer.concat(buffers))
-      })
-
-      doc.on('error', reject)
+      doc.on("error", reject);
 
       /* ===================================================== */
       /* HEADER */
       /* ===================================================== */
 
-      doc
-        .fontSize(18)
-        .text('COMANDASH DEMO', {
-          align: 'center',
-        })
+      doc.fontSize(22).font("Helvetica-Bold").text("COMANDASH", {
+        align: "center",
+      });
 
-      doc.moveDown(0.3)
+      doc.fontSize(22).font("Helvetica-Bold").text("DEMO", {
+        align: "center",
+      });
 
-      doc
-        .fontSize(10)
-        .text('NIT: 900.000.000-0', {
-          align: 'center',
-        })
+      doc.moveDown(0.5);
 
-      doc.text('Bogotá, Colombia', {
-        align: 'center',
-      })
+      doc.fontSize(10).font("Helvetica").text("NIT: 900.000.000-0", {
+        align: "center",
+      });
 
-      doc.moveDown()
+      doc.text("Bogotá, Colombia", {
+        align: "center",
+      });
+
+      doc.moveDown(0.6);
+
+      doc.fontSize(14).font("Helvetica-Bold").text("RECIBO DE VENTA", {
+        align: "center",
+      });
+
+      doc.moveDown();
 
       /* ===================================================== */
       /* ORDER INFO */
       /* ===================================================== */
 
-      doc
-        .fontSize(11)
-        .text(`Orden #${order.id}`)
+      doc.fontSize(10).font("Helvetica").text(`Orden #${order.id}`, {
+        align: "center",
+      });
 
-      doc.text(`Fecha: ${order.createdAt.toFormat('dd/MM/yyyy HH:mm')}`)
+      doc.text(`Fecha: ${order.createdAt.toFormat("dd/MM/yyyy HH:mm")}`, {
+        align: "center",
+      });
 
       if (order.tableId) {
-        doc.text(`Mesa: ${order.tableId}`)
+        doc.text(`Mesa: ${order.tableId}`, {
+          align: "center",
+        });
       }
 
-      doc.moveDown()
+      doc.moveDown();
 
       /* ===================================================== */
       /* DIVIDER */
       /* ===================================================== */
 
-      doc
-        .moveTo(15, doc.y)
-        .lineTo(210, doc.y)
-        .stroke()
+      doc.moveTo(15, doc.y).lineTo(195, doc.y).stroke();
 
-      doc.moveDown()
+      doc.moveDown();
 
       /* ===================================================== */
       /* PRODUCTS */
       /* ===================================================== */
 
-      let subtotal = 0
+      let subtotal = 0;
 
       for (const item of order.orderItems) {
+        const itemTotal = Number(item.totalPrice);
 
-        const itemTotal = Number(item.totalPrice)
+        subtotal += itemTotal;
 
-        subtotal += itemTotal
+        const productName = `${item.quantity}x ${item.product?.name || "Producto"}`;
+
+        const currentY = doc.y;
+
+        doc.fontSize(10).font("Helvetica").text(productName, 15, currentY, {
+          width: 115,
+          align: "left",
+        });
 
         doc
-          .fontSize(10)
-          .text(
-            `${item.quantity}x ${item.product?.name || 'Producto'}`,
-            {
-              continued: true,
-              width: 140,
-            }
-          )
-          .text(
-            `$${itemTotal.toLocaleString('es-CO')}`,
-            {
-              align: 'right',
-            }
-          )
+          .font("Helvetica-Bold")
+          .text(`$${itemTotal.toLocaleString("es-CO")}`, 140, currentY, {
+            width: 55,
+            align: "right",
+          });
 
+        doc.moveDown(0.7);
       }
 
-      doc.moveDown()
+      doc.moveDown(0.5);
 
       /* ===================================================== */
       /* TOTAL */
       /* ===================================================== */
 
+      doc.moveTo(15, doc.y).lineTo(195, doc.y).stroke();
+
+      doc.moveDown();
+
+      const total = subtotal;
+
       doc
-        .moveTo(15, doc.y)
-        .lineTo(210, doc.y)
-        .stroke()
+        .fontSize(16)
+        .font("Helvetica-Bold")
+        .text("TOTAL", 15, doc.y, {
+          continued: true,
+        })
+        .text(`$${total.toLocaleString("es-CO")}`, {
+          align: "right",
+        });
 
-      doc.moveDown()
-
-      doc
-        .fontSize(14)
-        .text(
-          'TOTAL',
-          {
-            continued: true,
-          }
-        )
-        .text(
-          `$${subtotal.toLocaleString('es-CO')}`,
-          {
-            align: 'right',
-          }
-        )
-
-      doc.moveDown()
+      doc.moveDown(1);
 
       /* ===================================================== */
       /* PAYMENT METHOD */
       /* ===================================================== */
 
+      let paymentMethodName = "Pago registrado";
+
       if (order.payments?.length) {
+        const payment = order.payments[0] as any;
 
-          const payment = order.payments[0]
-
-        doc
-          .fontSize(10)
-          .text(`Método de pago: ${'Pago registrado'}`)
-
+        if (payment?.paymentMethod?.name) {
+          paymentMethodName = payment.paymentMethod.name;
+        }
       }
 
-      doc.moveDown()
+      doc
+        .fontSize(10)
+        .font("Helvetica")
+        .text(`Método de pago: ${paymentMethodName}`, {
+          align: "center",
+        });
+
+      doc.moveDown(1);
 
       /* ===================================================== */
       /* FOOTER */
       /* ===================================================== */
 
-      doc
-        .fontSize(10)
-        .text('Gracias por tu compra', {
-          align: 'center',
-        })
+      doc.fontSize(10).font("Helvetica").text("Gracias por tu compra", {
+        align: "center",
+      });
 
-      doc.text('Vuelve pronto :)', {
-        align: 'center',
-      })
+      doc.moveDown(0.2);
 
-      doc.end()
+      doc.text("Vuelve pronto :)", {
+        align: "center",
+      });
 
-    })
+      doc.moveDown();
 
+      doc.fontSize(8).text("Generado por COMANDASH", {
+        align: "center",
+      });
+
+      doc.end();
+    });
   }
-
 }
