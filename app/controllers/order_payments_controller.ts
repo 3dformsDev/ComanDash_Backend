@@ -1,56 +1,58 @@
-import CashMovement from '#models/cash_movement'
-import Order from '#models/order'
-import OrderPayment from '#models/order_payment'
-import { createOrderPaymentValidator } from '#validators/order_payment'
-import type { HttpContext } from '@adonisjs/core/http'
-import db from '@adonisjs/lucid/services/db'
-import { Decimal } from 'decimal.js' // NUEVO: Importar Decimal.js
-import { DateTime } from 'luxon'
-import OrderStatusHistory from '#models/order_status_history'
-import OrdersController from './orders_controller.js'
-import { io } from '#start/socket'
+import CashMovement from "#models/cash_movement";
+import Order from "#models/order";
+import OrderPayment from "#models/order_payment";
+import { createOrderPaymentValidator } from "#validators/order_payment";
+import type { HttpContext } from "@adonisjs/core/http";
+import db from "@adonisjs/lucid/services/db";
+import { Decimal } from "decimal.js"; // NUEVO: Importar Decimal.js
+import { DateTime } from "luxon";
+import OrderStatusHistory from "#models/order_status_history";
+import OrdersController from "./orders_controller.js";
+import { io } from "#start/socket";
+import OrderAdjustmentService from "#services/orders/order_adjustment_service";
 
 export default class OrderPaymentsController {
   /**
    * Display a list of resource
    */
   async index({ request, response, companyId, getQueryData }: HttpContext) {
-    const { page = 1, perPage = 10 } = getQueryData()
+    const { page = 1, perPage = 10 } = getQueryData();
 
-    const qs = request.qs()
+    const qs = request.qs();
     const orderId = qs.order_id ? qs.order_id : null;
     const paymentMethodId = qs.payment_method_id ? qs.payment_method_id : null;
     const cashRegisterId = qs.cash_register_id ? qs.cash_register_id : null;
     const locationId = qs.location_id ? qs.location_id : null;
 
-    let query = OrderPayment.query()
-      .whereHas('order', (orderQuery) => {
-        orderQuery.where('company_id', companyId)
-      });
+    let query = OrderPayment.query().whereHas("order", (orderQuery) => {
+      orderQuery.where("company_id", companyId);
+    });
 
-    if (orderId) query = query.where('order_id', orderId);
-    if (paymentMethodId) query = query.where('payment_method_id', paymentMethodId);
-    if (cashRegisterId) query = query.where('cash_register_session_id', cashRegisterId);
+    if (orderId) query = query.where("order_id", orderId);
+    if (paymentMethodId)
+      query = query.where("payment_method_id", paymentMethodId);
+    if (cashRegisterId)
+      query = query.where("cash_register_session_id", cashRegisterId);
     if (locationId) {
-      query = query.whereHas('order', (orderQuery) => {
-        orderQuery.where('location_id', locationId);
-      })
+      query = query.whereHas("order", (orderQuery) => {
+        orderQuery.where("location_id", locationId);
+      });
     }
 
     try {
       const orderPayments = await query
-        .preload('order', (orderQuery) => orderQuery.preload('location'))
-        .preload('paymentMethod', (pmQuery) => pmQuery.select('id', 'name'))
-        .preload('cashRegisterSession')
-        .orderBy('processed_at', 'desc')
-        .paginate(page, perPage)
+        .preload("order", (orderQuery) => orderQuery.preload("location"))
+        .preload("paymentMethod", (pmQuery) => pmQuery.select("id", "name"))
+        .preload("cashRegisterSession")
+        .orderBy("processed_at", "desc")
+        .paginate(page, perPage);
 
-      return response.ok(orderPayments)
+      return response.ok(orderPayments);
     } catch (error) {
       return response.internalServerError({
-        message: 'Ocurrió un error al obtener los pagos de órdenes.',
+        message: "Ocurrió un error al obtener los pagos de órdenes.",
         error: error.message,
-      })
+      });
     }
   }
 
@@ -58,87 +60,125 @@ export default class OrderPaymentsController {
    * REEMPLAZA TU MÉTODO ANTERIOR CON ESTE
    * Crea un nuevo pago (sale) o un reembolso (withdrawal) para una orden.
    */
-  async store({ request, response, companyId, cashRegisterSessionId, locationId, auth }: HttpContext) {
+  async store({
+    request,
+    response,
+    companyId,
+    cashRegisterSessionId,
+    locationId,
+    auth,
+  }: HttpContext) {
     const trx = await db.transaction();
     try {
       // NOTA: Tu validador debe ser ajustado para requerir 'movementType' y 'amount' para withdrawals
-      const payload = await request.validateUsing(createOrderPaymentValidator(companyId, locationId!))
-      const { orderId, paymentMethodId, notes, amount, movementType } = payload;
+      const payload = await request.validateUsing(
+        createOrderPaymentValidator(companyId, locationId!),
+      );
+      const {
+        orderId,
+        paymentMethodId,
+        notes,
+        amount,
+        movementType,
+        adjustments = [],
+      } = payload;
 
       const order = await Order.query({ client: trx })
-        .where('id', orderId)
-        .where('company_id', companyId)
-        .preload('orderItems', (itemQuery: any) => {
-          return itemQuery
-            .preload('product', (subQuery: any) => {
-              return subQuery.preload('category')
-            })
+        .where("id", orderId)
+        .where("company_id", companyId)
+        .preload("orderItems", (itemQuery: any) => {
+          return itemQuery.preload("product", (subQuery: any) => {
+            return subQuery.preload("category");
+          });
         })
-        .preload('table')
-        .preload('payments')
-        .first()
+        .preload("table")
+        .preload("payments")
+        .first();
+
+      // Aplicar ajustes y recalcular total real
+      await OrderAdjustmentService.applyAdjustments(order!, adjustments, trx);
+
+      // Recargar ajustes actualizados
+      await order!.load("adjustments");
 
       if (!order) {
-        await trx.rollback()
-        return response.notFound({ message: 'La orden no fue encontrada o no pertenece a la compañía.' })
+        await trx.rollback();
+        return response.notFound({
+          message: "La orden no fue encontrada o no pertenece a la compañía.",
+        });
       }
 
       const amountAlreadyPaid = order.payments.reduce(
-        (sum, payment) => sum.plus(payment.amount), new Decimal(0)
+        (sum, payment) => sum.plus(payment.amount),
+        new Decimal(0),
       );
 
       // --- FLUJO DE REEMBOLSO (WITHDRAWAL) ---
-      if (movementType === 'withdrawal') {
+      if (movementType === "withdrawal") {
         const refundAmount = new Decimal(amount || 0);
 
         if (amountAlreadyPaid.lessThanOrEqualTo(0)) {
           await trx.rollback();
-          return response.conflict({ message: 'No se puede hacer una devolución si no existen pagos previos.' });
+          return response.conflict({
+            message:
+              "No se puede hacer una devolución si no existen pagos previos.",
+          });
         }
         if (refundAmount.greaterThan(amountAlreadyPaid)) {
           await trx.rollback();
-          return response.conflict({ message: `El monto a devolver (${refundAmount}) no puede ser mayor al total pagado (${amountAlreadyPaid}).` });
+          return response.conflict({
+            message: `El monto a devolver (${refundAmount}) no puede ser mayor al total pagado (${amountAlreadyPaid}).`,
+          });
         }
 
-        const orderPayment = await OrderPayment.create({
-          orderId,
-          paymentMethodId,
-          notes: notes || `Reembolso para orden #${order.orderNumber}`,
-          amount: refundAmount.negated().toNumber(), // <- Monto NEGATIVO
-          cashRegisterSessionId,
-          processedBy: auth.user!.id,
-          processedAt: DateTime.now(),
-        }, { client: trx });
+        const orderPayment = await OrderPayment.create(
+          {
+            orderId,
+            paymentMethodId,
+            notes: notes || `Reembolso para orden #${order.orderNumber}`,
+            amount: refundAmount.negated().toNumber(), // <- Monto NEGATIVO
+            cashRegisterSessionId,
+            processedBy: auth.user!.id,
+            processedAt: DateTime.now(),
+          },
+          { client: trx },
+        );
 
-        const cashMovement = await CashMovement.create({
-          companyId,
-          cashRegisterSessionId,
-          orderId,
-          userId: auth.user!.id,
-          movementType: 'withdrawal', // <- Tipo de movimiento
-          amount: refundAmount.toNumber(), // <- Monto POSITIVO
-          notes: notes || `Reembolso para orden #${order.orderNumber}`,
-        }, { client: trx });
+        const cashMovement = await CashMovement.create(
+          {
+            companyId,
+            cashRegisterSessionId,
+            orderId,
+            userId: auth.user!.id,
+            movementType: "withdrawal", // <- Tipo de movimiento
+            amount: refundAmount.toNumber(), // <- Monto POSITIVO
+            notes: notes || `Reembolso para orden #${order.orderNumber}`,
+          },
+          { client: trx },
+        );
 
         // MODIFICADO: La orden vuelve a estar pendiente de pago tras un reembolso.
-        await order.merge({ status: 'pending' }).save();
+        await order.merge({ status: "pending" }).save();
 
         // MODIFICADO: Registrar el cambio de estado en el historial.
-        await OrderStatusHistory.create({
-          orderId: order.id,
-          previousStatus: 'paid',
-          newStatus: 'pending',
-          changedBy: auth.user!.id,
-          reason: 'Reembolso procesado',
-        }, { client: trx })
+        await OrderStatusHistory.create(
+          {
+            orderId: order.id,
+            previousStatus: "paid",
+            newStatus: "pending",
+            changedBy: auth.user!.id,
+            reason: "Reembolso procesado",
+          },
+          { client: trx },
+        );
 
         // Verificar si la mesa debe ser desocupada después del pago
-        if (order.orderType === 'dine_in' && order.tableId) {
+        if (order.orderType === "dine_in" && order.tableId) {
           // Necesitamos una instancia para llamar al método no estático
-          const ordersController = new OrdersController()
+          const ordersController = new OrdersController();
           // OJO: El método en OrdersController debe ser público para ser llamado desde aquí
           // public async updateTableStatus(tableId: number, trx: any) { ... }
-          await ordersController.updateTableStatus(order.tableId, trx)
+          await ordersController.updateTableStatus(order.tableId, trx);
         }
 
         await trx.commit();
@@ -151,58 +191,68 @@ export default class OrderPaymentsController {
 
       // --- FLUJO DE PAGO (SALE) ---
       else {
+        const totalAmountDue = new Decimal(order.totalAmount || 0);
 
-        const totalAmountDue = order.orderItems.reduce(
-          (sum, item) => sum.plus(item.totalPrice), new Decimal(0)
-        );
         // La variable amountAlreadyPaid ya incluye los reembolsos (pagos negativos)
         const amountToPay = totalAmountDue.minus(amountAlreadyPaid);
 
         // MODIFICADO: Esta es la validación correcta. Si el saldo es 0 o menos, la orden está pagada.
         if (amountToPay.lessThanOrEqualTo(0)) {
-          await trx.rollback()
-          return response.conflict({ message: 'La orden no tiene saldo pendiente de pago o ya fue pagada.' })
+          await trx.rollback();
+          return response.conflict({
+            message:
+              "La orden no tiene saldo pendiente de pago o ya fue pagada.",
+          });
         }
 
         const finalAmountToPay = amountToPay.toNumber();
 
-        const orderPayment = await OrderPayment.create({
-          orderId,
-          paymentMethodId,
-          notes: notes || `Pago para orden #${order.orderNumber}`,
-          amount: finalAmountToPay,
-          cashRegisterSessionId,
-          processedBy: auth.user!.id,
-          processedAt: DateTime.now(),
-        }, { client: trx });
+        const orderPayment = await OrderPayment.create(
+          {
+            orderId,
+            paymentMethodId,
+            notes: notes || `Pago para orden #${order.orderNumber}`,
+            amount: finalAmountToPay,
+            cashRegisterSessionId,
+            processedBy: auth.user!.id,
+            processedAt: DateTime.now(),
+          },
+          { client: trx },
+        );
 
-        const cashMovement = await CashMovement.create({
-          companyId,
-          cashRegisterSessionId,
-          orderId,
-          userId: auth.user!.id,
-          movementType: 'sale',
-          amount: finalAmountToPay,
-          notes: `Pago para orden #${order.orderNumber}`,
-        }, { client: trx });
+        const cashMovement = await CashMovement.create(
+          {
+            companyId,
+            cashRegisterSessionId,
+            orderId,
+            userId: auth.user!.id,
+            movementType: "sale",
+            amount: finalAmountToPay,
+            notes: `Pago para orden #${order.orderNumber}`,
+          },
+          { client: trx },
+        );
 
-        await order.merge({ status: 'paid', paidAt: DateTime.now() }).save();
+        await order.merge({ status: "paid", paidAt: DateTime.now() }).save();
 
-        await OrderStatusHistory.create({
-          orderId: order.id,
-          previousStatus: order.status,
-          newStatus: 'paid',
-          changedBy: auth.user!.id,
-          reason: 'Pago completado',
-        }, { client: trx });
+        await OrderStatusHistory.create(
+          {
+            orderId: order.id,
+            previousStatus: order.status,
+            newStatus: "paid",
+            changedBy: auth.user!.id,
+            reason: "Pago completado",
+          },
+          { client: trx },
+        );
 
         await trx.commit();
 
-        const roomName = `kitchen_room_${companyId}_${locationId}`
-        io.to(roomName).emit('order_updated', order)
+        const roomName = `kitchen_room_${companyId}_${locationId}`;
+        io.to(roomName).emit("order_updated", order);
 
         if (order.isServed) {
-          io.to(roomName).emit('order_payment_completed', order)
+          io.to(roomName).emit("order_payment_completed", order);
         }
 
         return response.created({
@@ -211,18 +261,26 @@ export default class OrderPaymentsController {
           cashMovement,
         });
       }
-
     } catch (error) {
       await trx.rollback();
       // ... (manejo de errores sin cambios)
-      if (error.status === 422 || error.code === 'E_VALIDATION_ERROR') {
-        return response.status(422).json({ message: 'Los datos enviados no son válidos', errors: error.messages || [] })
+      if (error.status === 422 || error.code === "E_VALIDATION_ERROR") {
+        return response.status(422).json({
+          message: "Los datos enviados no son válidos",
+          errors: error.messages || [],
+        });
       }
-      if (error.code && error.code.startsWith('ER_')) {
-        return response.status(400).json({ message: 'Error en la base de datos', error: 'Hay un problema con los datos proporcionados' })
+      if (error.code && error.code.startsWith("ER_")) {
+        return response.status(400).json({
+          message: "Error en la base de datos",
+          error: "Hay un problema con los datos proporcionados",
+        });
       }
-      console.error('Error creating order payment:', error)
-      return response.internalServerError({ message: 'Ocurrió un error interno al crear el pago.', error: error.message })
+      console.error("Error creating order payment:", error);
+      return response.internalServerError({
+        message: "Ocurrió un error interno al crear el pago.",
+        error: error.message,
+      });
     }
   }
 
@@ -232,18 +290,20 @@ export default class OrderPaymentsController {
   async show({ response, params, companyId }: HttpContext) {
     try {
       const orderPayment = await OrderPayment.query()
-        .whereHas('order', (orderQuery) => orderQuery.where('company_id', companyId))
-        .where('id', params.id)
-        .preload('order', (orderQuery) => orderQuery.preload('location'))
-        .preload('paymentMethod', (pmQuery) => pmQuery.select('id', 'name'))
-        .preload('cashRegisterSession')
-        .firstOrFail()
+        .whereHas("order", (orderQuery) =>
+          orderQuery.where("company_id", companyId),
+        )
+        .where("id", params.id)
+        .preload("order", (orderQuery) => orderQuery.preload("location"))
+        .preload("paymentMethod", (pmQuery) => pmQuery.select("id", "name"))
+        .preload("cashRegisterSession")
+        .firstOrFail();
 
-      return response.ok(orderPayment)
+      return response.ok(orderPayment);
     } catch (error) {
       return response.notFound({
         message: `El pago con ID ${params.id} no fue encontrado.`,
-      })
+      });
     }
   }
 
@@ -252,8 +312,8 @@ export default class OrderPaymentsController {
    */
   async update({ response }: HttpContext) {
     return response.badRequest({
-      message: 'Los pagos no pueden ser modificados por trazabilidad.',
-    })
+      message: "Los pagos no pueden ser modificados por trazabilidad.",
+    });
   }
 
   /**
@@ -261,7 +321,7 @@ export default class OrderPaymentsController {
    */
   async destroy({ response }: HttpContext) {
     return response.badRequest({
-      message: 'Los pagos no pueden ser eliminados por trazabilidad.',
-    })
+      message: "Los pagos no pueden ser eliminados por trazabilidad.",
+    });
   }
 }
