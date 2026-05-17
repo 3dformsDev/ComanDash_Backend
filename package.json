@@ -39,6 +39,7 @@
     "@swc/core": "1.11.24",
     "@types/luxon": "^3.7.1",
     "@types/node": "^22.15.18",
+    "@types/pdfkit": "^0.17.6",
     "hot-hook": "^0.4.0",
     "pino-pretty": "^13.0.0",
     "ts-node-maintained": "^10.9.5",
@@ -59,6 +60,7 @@
     "jspdf-autotable": "^5.0.2",
     "luxon": "^3.7.1",
     "mysql2": "^3.14.3",
+    "pdfkit": "^0.18.0",
     "reflect-metadata": "^0.2.2",
     "socket.io": "^4.8.1"
   },
