@@ -74,7 +74,9 @@ export default class ReceiptPdfService {
       /* ORDER INFO */
       /* ===================================================== */
 
-      doc.fontSize(10).font("Helvetica").text(`Orden #${order.id}`, {
+      const visualOrderNumber = `${order.companyId}${String(order.companyOrderNumber).padStart(7, "0")}`;
+
+      doc.fontSize(10).font("Helvetica").text(`Orden #${visualOrderNumber}`, {
         align: "center",
       });
 

@@ -115,6 +115,11 @@ export default class Order extends TenantBase {
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updatedAt: DateTime;
 
+  @column({
+    columnName: "company_order_number",
+  })
+  declare companyOrderNumber: number; // Nuevo campo para el número de orden a nivel de empresa
+
   // Relaciones
   @belongsTo(() => Company)
   declare company: BelongsTo<typeof Company>;
