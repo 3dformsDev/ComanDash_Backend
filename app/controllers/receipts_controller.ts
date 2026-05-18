@@ -13,6 +13,8 @@ export default class ReceiptsController {
       .preload("payments", (query) => {
         query.preload("paymentMethod");
       })
+      .preload("adjustments")
+      .preload("company")
       .firstOrFail();
 
     const pdfBuffer = await ReceiptPdfService.generate(order);
