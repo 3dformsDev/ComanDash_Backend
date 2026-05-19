@@ -19,6 +19,7 @@ import Table from "#models/table";
 import { io } from "#start/socket";
 import firebaseService from "#services/firebase_service";
 import cache from "@adonisjs/cache/services/main";
+import OrderAdjustmentService from "#services/orders/order_adjustment_service";
 
 export default class OrdersController {
   /**
@@ -127,8 +128,14 @@ export default class OrdersController {
       const payload = await request.validateUsing(
         createOrderValidator(companyId, locationId!),
       );
-      const { orderItems, paymentMethodId, notesPayment, ...orderData } =
-        payload;
+      const {
+        orderItems,
+        paymentMethodId,
+        notesPayment,
+        adjustments = [],
+        ...orderData
+      } = payload;
+      payload;
 
       if (!cashRegisterSessionId) {
         return response.status(400).json({
@@ -269,6 +276,12 @@ export default class OrdersController {
 
       // CORRECCIÓN: Una sola actualización con todos los datos
       await order.merge(orderUpdateData).save();
+
+      if (adjustments.length > 0) {
+        await OrderAdjustmentService.applyAdjustments(order, adjustments, trx);
+
+        await order.load("adjustments");
+      }
 
       await trx.commit();
 
