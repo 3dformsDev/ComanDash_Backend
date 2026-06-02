@@ -192,12 +192,11 @@ export default class OrderPaymentsController {
       // --- FLUJO DE PAGO (SALE) ---
       else {
         const totalAmountDue = new Decimal(order.totalAmount || 0);
+        const pendingAmountBeforePayment =
+          totalAmountDue.minus(amountAlreadyPaid);
+        const requestedPaymentAmount = new Decimal(amount || 0);
 
-        // La variable amountAlreadyPaid ya incluye los reembolsos (pagos negativos)
-        const amountToPay = totalAmountDue.minus(amountAlreadyPaid);
-
-        // MODIFICADO: Esta es la validación correcta. Si el saldo es 0 o menos, la orden está pagada.
-        if (amountToPay.lessThanOrEqualTo(0)) {
+        if (pendingAmountBeforePayment.lessThanOrEqualTo(0)) {
           await trx.rollback();
           return response.conflict({
             message:
@@ -205,14 +204,26 @@ export default class OrderPaymentsController {
           });
         }
 
-        const finalAmountToPay = amountToPay.toNumber();
+        if (requestedPaymentAmount.lessThanOrEqualTo(0)) {
+          await trx.rollback();
+          return response.conflict({
+            message: "El monto del pago debe ser mayor a cero.",
+          });
+        }
+
+        if (requestedPaymentAmount.greaterThan(pendingAmountBeforePayment)) {
+          await trx.rollback();
+          return response.conflict({
+            message: `El monto recibido (${requestedPaymentAmount.toNumber()}) no puede ser mayor al saldo pendiente (${pendingAmountBeforePayment.toNumber()}).`,
+          });
+        }
 
         const orderPayment = await OrderPayment.create(
           {
             orderId,
             paymentMethodId,
-            notes: notes || `Pago para orden #${order.orderNumber}`,
-            amount: finalAmountToPay,
+            notes: notes || `Pago parcial para orden #${order.orderNumber}`,
+            amount: requestedPaymentAmount.toNumber(),
             cashRegisterSessionId,
             processedBy: auth.user!.id,
             processedAt: DateTime.now(),
@@ -227,38 +238,74 @@ export default class OrderPaymentsController {
             orderId,
             userId: auth.user!.id,
             movementType: "sale",
-            amount: finalAmountToPay,
-            notes: `Pago para orden #${order.orderNumber}`,
+            amount: requestedPaymentAmount.toNumber(),
+            notes: notes || `Pago parcial para orden #${order.orderNumber}`,
           },
           { client: trx },
         );
 
-        await order.merge({ status: "paid", paidAt: DateTime.now() }).save();
-
-        await OrderStatusHistory.create(
-          {
-            orderId: order.id,
-            previousStatus: order.status,
-            newStatus: "paid",
-            changedBy: auth.user!.id,
-            reason: "Pago completado",
-          },
-          { client: trx },
+        const paidAmountAfterPayment = amountAlreadyPaid.plus(
+          requestedPaymentAmount,
         );
+        const pendingAmountAfterPayment = totalAmountDue.minus(
+          paidAmountAfterPayment,
+        );
+        const isFullyPaid = pendingAmountAfterPayment.lessThanOrEqualTo(0);
+
+        if (isFullyPaid) {
+          const previousStatus = order.status;
+
+          await order
+            .merge({
+              status: "paid",
+              paidAt: DateTime.now(),
+            })
+            .save();
+
+          await OrderStatusHistory.create(
+            {
+              orderId: order.id,
+              previousStatus,
+              newStatus: "paid",
+              changedBy: auth.user!.id,
+              reason: "Pago completado",
+            },
+            { client: trx },
+          );
+        }
 
         await trx.commit();
 
-        const roomName = `kitchen_room_${companyId}_${locationId}`;
-        io.to(roomName).emit("order_updated", order);
+        const paymentSummary = {
+          totalAmount: totalAmountDue.toNumber(),
+          paidAmount: paidAmountAfterPayment.toNumber(),
+          pendingAmount: Decimal.max(
+            pendingAmountAfterPayment,
+            new Decimal(0),
+          ).toNumber(),
+          isFullyPaid,
+        };
 
-        if (order.isServed) {
-          io.to(roomName).emit("order_payment_completed", order);
+        const roomName = `kitchen_room_${companyId}_${locationId}`;
+        io.to(roomName).emit("order_updated", {
+          ...order.serialize(),
+          paymentSummary,
+        });
+
+        if (isFullyPaid && order.isServed) {
+          io.to(roomName).emit("order_payment_completed", {
+            ...order.serialize(),
+            paymentSummary,
+          });
         }
 
         return response.created({
-          message: `Pago de ${finalAmountToPay} procesado exitosamente.`,
+          message: isFullyPaid
+            ? `Pago final de ${requestedPaymentAmount.toNumber()} procesado exitosamente.`
+            : `Pago parcial de ${requestedPaymentAmount.toNumber()} procesado exitosamente.`,
           orderPayment,
           cashMovement,
+          paymentSummary,
         });
       }
     } catch (error) {

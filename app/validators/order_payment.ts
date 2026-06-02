@@ -24,14 +24,10 @@ export const createOrderPaymentValidator = (
       movementType: vine.enum(["sale", "withdrawal"]),
       amount: vine
         .string()
-        .regex(/^-?\d+(\.\d{1,2})?$/) // Permite números negativos
+        .regex(/^\d+(\.\d{1,2})?$/)
         .transform((value: string) =>
           new Decimal(value).toDecimalPlaces(2).toNumber(),
-        )
-        .optional()
-        .requiredWhen((field) => {
-          return field.parent.movementType === "withdrawal";
-        }),
+        ),
       paymentMethodId: vine.number().exists(async (db, value) => {
         // Validar que el método de pago existe y pertenece a la compañía
         return await db
