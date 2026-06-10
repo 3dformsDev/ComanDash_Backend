@@ -93,13 +93,8 @@ export default class OrderPaymentsController {
         })
         .preload("table")
         .preload("payments")
+        .preload("adjustments")
         .first();
-
-      // Aplicar ajustes y recalcular total real
-      await OrderAdjustmentService.applyAdjustments(order!, adjustments, trx);
-
-      // Recargar ajustes actualizados
-      await order!.load("adjustments");
 
       if (!order) {
         await trx.rollback();
@@ -108,10 +103,32 @@ export default class OrderPaymentsController {
         });
       }
 
+      /**
+       * Importante:
+       * Solo se aplican ajustes cuando realmente vienen ajustes desde el frontend.
+       * Si viene [] o no viene nada, NO se borran los ajustes existentes.
+       */
       const amountAlreadyPaid = order.payments.reduce(
         (sum, payment) => sum.plus(payment.amount),
         new Decimal(0),
       );
+
+      const hasIncomingAdjustments =
+        Array.isArray(adjustments) && adjustments.length > 0;
+
+      if (hasIncomingAdjustments && amountAlreadyPaid.greaterThan(0)) {
+        await trx.rollback();
+
+        return response.conflict({
+          message:
+            "No se pueden modificar recargos o descuentos después de registrar el primer abono.",
+        });
+      }
+
+      if (hasIncomingAdjustments) {
+        await OrderAdjustmentService.applyAdjustments(order, adjustments, trx);
+        await order.load("adjustments");
+      }
 
       // --- FLUJO DE REEMBOLSO (WITHDRAWAL) ---
       if (movementType === "withdrawal") {
@@ -276,6 +293,15 @@ export default class OrderPaymentsController {
 
         await trx.commit();
 
+        const serializedAdjustments = (order.adjustments || []).map(
+          (adjustment) => ({
+            id: adjustment.id,
+            type: adjustment.type,
+            description: adjustment.description,
+            amount: Number(adjustment.amount || 0),
+          }),
+        );
+
         const paymentSummary = {
           totalAmount: totalAmountDue.toNumber(),
           paidAmount: paidAmountAfterPayment.toNumber(),
@@ -284,6 +310,7 @@ export default class OrderPaymentsController {
             new Decimal(0),
           ).toNumber(),
           isFullyPaid,
+          adjustments: serializedAdjustments,
         };
 
         const roomName = `kitchen_room_${companyId}_${locationId}`;

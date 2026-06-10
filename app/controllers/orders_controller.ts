@@ -1436,8 +1436,10 @@ export default class OrdersController {
           }); // Precargamos los productos para saber sus nombres
         })
         .preload("waiter")
-        .preload("table") // Y la información de la mesa
-        .orderBy("created_at", "asc"); // Las más antiguas primero
+        .preload("table")
+        .preload("payments")
+        .preload("adjustments")
+        .orderBy("created_at", "asc");
 
       return response.ok(activeOrders);
     } catch (error) {
