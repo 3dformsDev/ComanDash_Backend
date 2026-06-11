@@ -38,18 +38,38 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
             .where("company_id", companyId)
             .where("is_active", true)
             .first();
+
           return !!result;
         })
         .optional()
         .requiredWhen((field) => {
-          return field.parent.isAdvancePayment === true;
+          return (
+            field.parent.isAdvancePayment === true &&
+            (!Array.isArray(field.parent.advancePayments) ||
+              field.parent.advancePayments.length === 0)
+          );
         }),
-      notesPayment: vine
-        .string()
-        .optional()
-        .requiredWhen((field) => {
-          return field.parent.isAdvancePayment === true;
-        }),
+
+      notesPayment: vine.string().optional(),
+
+      advancePayments: vine
+        .array(
+          vine.object({
+            paymentMethodId: vine.number().exists(async (db, value) => {
+              const result = await db
+                .from("payment_methods")
+                .where("id", value)
+                .where("company_id", companyId)
+                .where("is_active", true)
+                .first();
+
+              return !!result;
+            }),
+            amount: vine.number().min(1),
+            notesPayment: vine.string().optional(),
+          }),
+        )
+        .optional(),
 
       adjustments: vine
         .array(

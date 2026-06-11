@@ -133,9 +133,9 @@ export default class OrdersController {
         paymentMethodId,
         notesPayment,
         adjustments = [],
+        advancePayments = [],
         ...orderData
       } = payload;
-      payload;
 
       if (!cashRegisterSessionId) {
         return response.status(400).json({
@@ -214,54 +214,94 @@ export default class OrdersController {
         throw new Error("Error al procesar los items de la orden");
       }
 
-      // CORRECCIÓN: Preparar datos de actualización
-      let orderUpdateData: {
-        subtotal: number;
-        totalAmount: number;
-        paidAt?: any;
-        status?: any;
-      } = { subtotal, totalAmount };
+      // Primero guardamos subtotal y total base de productos
+      await order.merge({ subtotal, totalAmount }).save();
 
-      if (payload.isAdvancePayment && paymentMethodId) {
-        const { successPayment } = await this.addOrderPayment(
-          order.id,
-          paymentMethodId,
-          cashRegisterSessionId,
-          auth.user!.id,
-          notesPayment,
-          trx,
-        );
+      // Luego aplicamos recargos/descuentos antes de registrar pagos
+      if (adjustments.length > 0) {
+        await OrderAdjustmentService.applyAdjustments(order, adjustments, trx);
+        await order.load("adjustments");
+      }
 
-        if (!successPayment) {
-          throw new Error("Error al procesar el pago de la orden");
+      // Volvemos a consultar la orden dentro de la transacción para obtener el total final ajustado
+      const orderWithFinalTotals = await Order.query({ client: trx })
+        .where("id", order.id)
+        .firstOrFail();
+
+      const finalTotalAmount = Number(
+        orderWithFinalTotals.totalAmount || totalAmount,
+      );
+
+      if (payload.isAdvancePayment) {
+        const paymentsToRegister =
+          Array.isArray(advancePayments) && advancePayments.length > 0
+            ? advancePayments
+            : paymentMethodId
+              ? [
+                  {
+                    paymentMethodId,
+                    amount: finalTotalAmount,
+                    notesPayment: notesPayment || "Pago anticipado completo",
+                  },
+                ]
+              : [];
+
+        if (paymentsToRegister.length === 0) {
+          throw new Error(
+            "No se recibieron datos de pago para el cobro anticipado",
+          );
         }
 
-        const { successPaymentCashMovement } =
+        const totalReceived = paymentsToRegister.reduce((sum, payment) => {
+          return sum.plus(Number(payment.amount || 0));
+        }, new Decimal(0));
+
+        const expectedTotal = new Decimal(finalTotalAmount);
+
+        if (totalReceived.minus(expectedTotal).abs().greaterThan(0.0001)) {
+          throw new Error(
+            `El total recibido (${totalReceived.toNumber()}) no coincide con el total de la orden (${expectedTotal.toNumber()})`,
+          );
+        }
+
+        for (const payment of paymentsToRegister) {
+          const amount = Number(payment.amount || 0);
+
+          if (!payment.paymentMethodId || amount <= 0) {
+            throw new Error(
+              "Uno de los pagos anticipados tiene datos inválidos",
+            );
+          }
+
+          await this.addOrderPaymentOptimized(
+            order.id,
+            Number(payment.paymentMethodId),
+            cashRegisterSessionId,
+            auth.user!.id,
+            amount,
+            payment.notesPayment || notesPayment || "Pago anticipado",
+            trx,
+          );
+
           await this.addCashMovementPayment(
             companyId,
             cashRegisterSessionId,
             order.id,
             auth.user!.id,
-            totalAmount,
+            amount,
             "sale",
             `Venta realizada en órdenes para órden ${order!.orderNumber}`,
             trx,
           );
-
-        if (!successPaymentCashMovement) {
-          throw new Error(
-            "Error al procesar el pago de la orden en movimiento de caja",
-          );
         }
 
-        // CORRECCIÓN: Agregar campos de pago a los datos de actualización
-        orderUpdateData = {
-          ...orderUpdateData,
-          paidAt: DateTime.now(),
-          status: "paid" as const,
-        };
+        await order
+          .merge({
+            paidAt: DateTime.now(),
+            status: "paid" as const,
+          })
+          .save();
 
-        // CORRECCIÓN: Registrar el cambio de estado en el historial
         await OrderStatusHistory.create(
           {
             orderId: order.id,
@@ -272,15 +312,6 @@ export default class OrdersController {
           },
           { client: trx },
         );
-      }
-
-      // CORRECCIÓN: Una sola actualización con todos los datos
-      await order.merge(orderUpdateData).save();
-
-      if (adjustments.length > 0) {
-        await OrderAdjustmentService.applyAdjustments(order, adjustments, trx);
-
-        await order.load("adjustments");
       }
 
       await trx.commit();
@@ -346,6 +377,7 @@ export default class OrdersController {
         .preload("orderItems")
         .preload("waiter")
         .preload("payments")
+        .preload("adjustments")
         .first();
 
       return response.created(completedOrder);
