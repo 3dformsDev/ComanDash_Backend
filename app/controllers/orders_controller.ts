@@ -823,6 +823,31 @@ export default class OrdersController {
         new Decimal(0),
       );
 
+      let currentUserRoleCode: string | null = null;
+
+      try {
+        await auth.user!.load("role");
+        currentUserRoleCode = auth.user!.role?.code || null;
+      } catch {
+        currentUserRoleCode = null;
+      }
+
+      const canManagePaidRefund = ["super_admin", "admin"].includes(
+        currentUserRoleCode || "",
+      );
+
+      const requiresAdminForServedPaidRefund =
+        amountAlreadyPaid.greaterThan(0) && order.isServed === true;
+
+      if (requiresAdminForServedPaidRefund && !canManagePaidRefund) {
+        await trx.rollback();
+
+        return response.status(403).json({
+          message:
+            "No tienes permisos para gestionar devoluciones de órdenes ya pagadas.",
+        });
+      }
+
       // Si hubo pagos, se debe procesar un reembolso
       if (amountAlreadyPaid.greaterThan(0)) {
         if (!payload.paymentMethodId) {
@@ -1365,6 +1390,7 @@ export default class OrdersController {
         // Filtra por la sucursal actual
         .where("location_id", locationId)
         .where("cash_register_session_id", cashRegisterSessionId!)
+        .whereNotIn("status", ["cancelled"])
         // La magia está aquí: whereHas asegura que la orden tenga al menos un
         // item que cumpla la condición del sub-query.
         .whereHas("orderItems", (query: any) => {
