@@ -243,18 +243,74 @@ export default class ReceiptPdfService {
       doc.moveDown(1);
 
       /* ===================================================== */
-      /* PAYMENT METHOD */
+      /* PAYMENT METHOD / SPLIT PAYMENTS */
       /* ===================================================== */
 
-      let paymentMethodName = "Pago registrado";
+      const payments = ((order as any).payments || []).filter(
+        (payment: any) => {
+          return Number(payment.amount || 0) !== 0;
+        },
+      );
 
-      if (order.payments?.length) {
-        const payment = order.payments[0] as any;
+      const positivePayments = payments.filter((payment: any) => {
+        return Number(payment.amount || 0) > 0;
+      });
 
-        if (payment?.paymentMethod?.name) {
-          paymentMethodName = payment.paymentMethod.name;
-        }
-      }
+      const refundPayments = payments.filter((payment: any) => {
+        return Number(payment.amount || 0) < 0;
+      });
+
+      const groupedPositivePayments = positivePayments.reduce(
+        (acc: Record<string, number>, payment: any) => {
+          const methodName =
+            payment?.paymentMethod?.name || "Método no especificado";
+
+          acc[methodName] =
+            (acc[methodName] || 0) + Number(payment.amount || 0);
+
+          return acc;
+        },
+        {},
+      );
+
+      const groupedRefundPayments = refundPayments.reduce(
+        (acc: Record<string, number>, payment: any) => {
+          const methodName =
+            payment?.paymentMethod?.name || "Método no especificado";
+
+          acc[methodName] =
+            (acc[methodName] || 0) + Math.abs(Number(payment.amount || 0));
+
+          return acc;
+        },
+        {},
+      );
+
+      const positivePaymentEntries = Object.entries(
+        groupedPositivePayments,
+      ) as [string, number][];
+
+      const refundPaymentEntries = Object.entries(groupedRefundPayments) as [
+        string,
+        number,
+      ][];
+
+      const totalPositivePaid = positivePaymentEntries.reduce(
+        (sum, [, amount]) => sum + amount,
+        0,
+      );
+
+      const totalRefunded = refundPaymentEntries.reduce(
+        (sum, [, amount]) => sum + amount,
+        0,
+      );
+
+      const netPaid = totalPositivePaid - totalRefunded;
+
+      const paymentMethodName =
+        positivePaymentEntries.length > 1
+          ? "Pago mixto"
+          : positivePaymentEntries[0]?.[0] || "Pago registrado";
 
       doc
         .fontSize(10)
@@ -262,6 +318,81 @@ export default class ReceiptPdfService {
         .text(`Método de pago: ${paymentMethodName}`, {
           align: "center",
         });
+
+      if (
+        positivePaymentEntries.length > 1 ||
+        refundPaymentEntries.length > 0
+      ) {
+        doc.moveDown(0.7);
+
+        doc.fontSize(10).font("Helvetica-Bold").text("Detalle de pagos", {
+          align: "center",
+        });
+
+        doc.moveDown(0.4);
+
+        for (const [methodName, amount] of positivePaymentEntries) {
+          const currentY = doc.y;
+
+          doc.fontSize(9).font("Helvetica").text(methodName, 15, currentY, {
+            width: 115,
+            align: "left",
+          });
+
+          doc
+            .font("Helvetica")
+            .text(`$${amount.toLocaleString("es-CO")}`, 140, currentY, {
+              width: 55,
+              align: "right",
+            });
+
+          doc.moveDown(0.55);
+        }
+
+        if (refundPaymentEntries.length > 0) {
+          doc.moveDown(0.2);
+
+          doc.fontSize(9).font("Helvetica-Bold").text("Devoluciones", {
+            align: "center",
+          });
+
+          doc.moveDown(0.3);
+
+          for (const [methodName, amount] of refundPaymentEntries) {
+            const currentY = doc.y;
+
+            doc.fontSize(9).font("Helvetica").text(methodName, 15, currentY, {
+              width: 115,
+              align: "left",
+            });
+
+            doc
+              .font("Helvetica")
+              .text(`-$${amount.toLocaleString("es-CO")}`, 140, currentY, {
+                width: 55,
+                align: "right",
+              });
+
+            doc.moveDown(0.55);
+          }
+        }
+
+        doc.moveDown(0.2);
+
+        doc.moveTo(15, doc.y).lineTo(195, doc.y).stroke();
+
+        doc.moveDown(0.4);
+
+        doc
+          .fontSize(9)
+          .font("Helvetica-Bold")
+          .text("Total pagado", 15, doc.y, {
+            continued: true,
+          })
+          .text(`$${netPaid.toLocaleString("es-CO")}`, {
+            align: "right",
+          });
+      }
 
       doc.moveDown(1);
 
