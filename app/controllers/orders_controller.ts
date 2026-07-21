@@ -20,6 +20,7 @@ import { io } from "#start/socket";
 import firebaseService from "#services/firebase_service";
 import cache from "@adonisjs/cache/services/main";
 import OrderAdjustmentService from "#services/orders/order_adjustment_service";
+import OrderAdjustment from "#models/order_adjustment";
 
 export default class OrdersController {
   /**
@@ -491,6 +492,81 @@ export default class OrdersController {
           });
         }
 
+        const isAdvancePaymentOrder = Boolean(
+          order.isAdvancePayment || order.isPrepaid,
+        );
+        const hasLeftKitchen = Boolean(
+          order.isReadyToServe ||
+            order.isServed ||
+            order.orderItems.some((item) =>
+              ["ready", "served"].includes(item.kitchenStatus),
+            ),
+        );
+
+        const currentQuantities = new Map<number, number>();
+        order.orderItems.forEach((item) => {
+          currentQuantities.set(
+            item.productId,
+            (currentQuantities.get(item.productId) || 0) +
+              Number(item.quantity || 0),
+          );
+        });
+
+        const requestedQuantities = new Map<number, number>();
+        orderItems.forEach((item) => {
+          requestedQuantities.set(
+            item.productId,
+            (requestedQuantities.get(item.productId) || 0) +
+              Number(item.quantity || 0),
+          );
+        });
+
+        if (order.status === "paid" && !isAdvancePaymentOrder) {
+          await trx.rollback();
+          return response.conflict({
+            message: "No se puede modificar una orden regular ya pagada.",
+            code: "ORDER_ALREADY_PAID",
+          });
+        }
+
+        if (order.status === "paid" && isAdvancePaymentOrder && hasLeftKitchen) {
+          await trx.rollback();
+          return response.conflict({
+            message:
+              "No se puede modificar una orden con cobro anticipado que ya salio de cocina.",
+            code: "PREPAID_ORDER_CLOSED",
+          });
+        }
+
+        const isRegularAddOnlyEdit =
+          !isAdvancePaymentOrder && order.status !== "paid" && hasLeftKitchen;
+
+        let hasAdditionalItems = false;
+
+        if (isRegularAddOnlyEdit) {
+          for (const [productId, currentQuantity] of currentQuantities) {
+            const requestedQuantity = requestedQuantities.get(productId) || 0;
+
+            if (requestedQuantity < currentQuantity) {
+              await trx.rollback();
+              return response.conflict({
+                message:
+                  "No se pueden quitar productos ni reducir cantidades de una orden que ya salio de cocina.",
+                code: "ORDER_ADD_ONLY",
+              });
+            }
+          }
+
+          for (const [productId, requestedQuantity] of requestedQuantities) {
+            const currentQuantity = currentQuantities.get(productId) || 0;
+
+            if (requestedQuantity > currentQuantity) {
+              hasAdditionalItems = true;
+              break;
+            }
+          }
+        }
+
         // Variable para la respuesta final
         let financialChange = new Decimal(0);
 
@@ -676,6 +752,15 @@ export default class OrdersController {
           totalAmount,
           wasModified: true,
         };
+
+        if (isRegularAddOnlyEdit && hasAdditionalItems) {
+          Object.assign(orderUpdateData, {
+            isReadyToServe: false,
+            isServed: false,
+            servedAt: null,
+          });
+        }
+
         await Order.query({ client: trx })
           .where("id", order.id)
           .update(orderUpdateData);
@@ -691,6 +776,7 @@ export default class OrdersController {
           .preload("waiter")
           .preload("payments")
           .preload("table")
+          .preload("adjustments")
           .first();
 
         if (updatedOrder) {
@@ -808,6 +894,11 @@ export default class OrdersController {
         .where("company_id", companyId)
         .where("location_id", locationId!)
         .preload("payments") // Cargar los pagos existentes
+        .preload("orderItems", (query) =>
+          query.preload("product", (productQuery) =>
+            productQuery.preload("category"),
+          ),
+        )
         .preload("waiter")
         .firstOrFail();
 
@@ -822,6 +913,23 @@ export default class OrdersController {
         (sum, payment) => sum.plus(payment.amount),
         new Decimal(0),
       );
+
+      const hasLeftKitchen = Boolean(
+        order.isReadyToServe ||
+          order.isServed ||
+          order.orderItems.some((item) =>
+            ["ready", "served"].includes(item.kitchenStatus),
+          ),
+      );
+
+      if (amountAlreadyPaid.isZero() && hasLeftKitchen) {
+        await trx.rollback();
+        return response.conflict({
+          message:
+            "No se puede cancelar una comanda con productos que ya salieron de cocina.",
+          code: "ORDER_CANCELLATION_CLOSED",
+        });
+      }
 
       let currentUserRoleCode: string | null = null;
 
@@ -968,10 +1076,36 @@ export default class OrdersController {
     );
 
     // 2. Mapear los items que NO se deben tocar (listos o servidos)
-    const preservedItemsMap = new Map<number, OrderItem>();
+    const preservedItemsMap = new Map<number, any>();
     currentItems.forEach((item) => {
       if (item.kitchenStatus === "ready" || item.kitchenStatus === "served") {
-        preservedItemsMap.set(item.productId, item);
+        const current = preservedItemsMap.get(item.productId);
+
+        if (current) {
+          preservedItemsMap.set(item.productId, {
+            ...current,
+            quantity: current.quantity + Number(item.quantity || 0),
+            totalPrice:
+              Number(current.totalPrice || 0) + Number(item.totalPrice || 0),
+            kitchenStatus:
+              current.kitchenStatus === "served" ||
+              item.kitchenStatus === "served"
+                ? "served"
+                : "ready",
+          });
+          return;
+        }
+
+        preservedItemsMap.set(item.productId, {
+          productId: item.productId,
+          quantity: Number(item.quantity || 0),
+          unitPrice: item.unitPrice,
+          totalPrice: item.totalPrice,
+          kitchenStatus: item.kitchenStatus,
+          kitchenStartedAt: item.kitchenStartedAt,
+          kitchenReadyAt: item.kitchenReadyAt,
+          specialInstructions: item.specialInstructions,
+        });
       }
     });
 
@@ -1126,8 +1260,16 @@ export default class OrdersController {
         subtotal = subtotal.plus(item.getTotalPriceAsDecimal());
       }
 
-      // El total por ahora es igual al subtotal
-      const totalAmount = subtotal;
+      const adjustments = await OrderAdjustment.query({ client: trx })
+        .where("order_id", orderId)
+        .exec();
+
+      const totalAmount = adjustments.reduce((total, adjustment) => {
+        const amount = new Decimal(adjustment.amount || 0);
+        return adjustment.type === "discount"
+          ? total.minus(amount)
+          : total.plus(amount);
+      }, subtotal);
 
       return {
         success: true,
@@ -1539,7 +1681,8 @@ export default class OrdersController {
 
       // 3. VALIDACIÓN: Verificar si todos los items ya están listos
       const areAllItemsReady = orderItems.every(
-        (item) => item.kitchenStatus === "ready",
+        (item) =>
+          item.kitchenStatus === "ready" || item.kitchenStatus === "served",
       );
       if (areAllItemsReady) {
         // Usamos el código 409 (Conflict) porque la acción no se puede realizar
@@ -1553,7 +1696,10 @@ export default class OrdersController {
       const isAnyItemServed = orderItems.some(
         (item) => item.kitchenStatus === "served",
       );
-      if (isAnyItemServed) {
+      if (
+        isAnyItemServed &&
+        orderItems.every((item) => item.kitchenStatus === "served")
+      ) {
         return response.conflict({
           message: `La orden #${order.id} no se puede modificar porque ya ha sido servida.`,
         });
@@ -1674,7 +1820,8 @@ export default class OrdersController {
 
       // Validar si todos están listos
       const areAllItemsReady = orderItems.every(
-        (item) => item.kitchenStatus === "ready",
+        (item) =>
+          item.kitchenStatus === "ready" || item.kitchenStatus === "served",
       );
       if (!areAllItemsReady) {
         return response.conflict({
