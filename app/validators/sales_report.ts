@@ -1,17 +1,12 @@
 // app/Validators/sales_report.ts
-import vine from '@vinejs/vine'
+import vine from "@vinejs/vine";
 
 /**
  * Valida los query params para el reporte de ventas.
  */
 export const salesReportValidator = vine.compile(
-    vine.object({
-        // vine.date() automáticamente parsea la fecha ISO
-        startDate: vine.date(),
-
-        // La fecha de fin debe ser posterior o igual a la de inicio
-        endDate: vine.date().afterOrEqual((field) => {
-            return field.parent.startDate
-        })
-    })
-)
+  vine.object({
+    startDate: vine.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+    endDate: vine.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+  }),
+);

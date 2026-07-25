@@ -4,9 +4,22 @@ import Order from "#models/order";
 import ReceiptPdfService from "#services/pdf/receipt_pdf_service";
 
 export default class ReceiptsController {
-  public async download({ params, response }: HttpContext) {
+  public async download({
+    params,
+    response,
+    companyId,
+    locationId,
+  }: HttpContext) {
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
     const order = await Order.query()
       .where("id", params.orderId)
+      .where("company_id", companyId)
+      .where("location_id", locationId)
       .preload("orderItems", (query) => {
         query.preload("product");
       })

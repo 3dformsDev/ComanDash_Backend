@@ -330,6 +330,10 @@ export default class OrderPaymentsController {
           message: isFullyPaid
             ? `Pago final de ${requestedPaymentAmount.toNumber()} procesado exitosamente.`
             : `Pago parcial de ${requestedPaymentAmount.toNumber()} procesado exitosamente.`,
+          order: {
+            ...order.serialize(),
+            paymentSummary,
+          },
           orderPayment,
           cashMovement,
           paymentSummary,

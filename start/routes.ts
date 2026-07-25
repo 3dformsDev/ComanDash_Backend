@@ -160,7 +160,6 @@ router.group(() => {
     .middleware([
       middleware.auth(),
       middleware.companyContext(),
-      middleware.ensureCashRegisterIsOpen(),
     ])
 
 
@@ -176,11 +175,20 @@ router.group(() => {
       middleware.companyContext(),
       middleware.ensureCashRegisterIsOpen(),
     ])
+  router.get('cashregistersessions/business-day-settings', [CashRegisterSessionsController, 'getBusinessDaySettings'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+  router.put('cashregistersessions/business-day-settings', [CashRegisterSessionsController, 'updateBusinessDaySettings'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
   router.get('cashregistersessions/dailysummary', [CashRegisterSessionsController, 'getDailyBusinessSummary'])
     .middleware([
       middleware.auth(),
       middleware.companyContext(),
-      middleware.ensureCashRegisterIsOpen(),
     ])
 
   router.post('cashregistersessions/:id/close', [CashRegisterSessionsController, 'closeSession'])

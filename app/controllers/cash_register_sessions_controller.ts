@@ -3,7 +3,19 @@ import CashRegister from "#models/cash_register";
 import CashRegisterSession from "#models/cash_registers_session";
 import Order from "#models/order";
 import OrderItem from "#models/order_item";
+import {
+  BUSINESS_TIME_ZONE,
+  DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+  getBusinessDayCutoffHour,
+  getCurrentBusinessDate,
+  saveBusinessDayCutoffHour,
+} from "#services/reports/business_day_service";
 import { io } from "#start/socket";
+import {
+  buildSalesReport,
+  getPaidOrdersForRange,
+} from "#services/reports/sales_reporting_service";
+import { businessDaySettingValidator } from "#validators/business_day_setting";
 import {
   closeCashRegisterSessionValidatorWithCompany,
   createCashRegisterSessionValidatorWithCompany,
@@ -345,9 +357,6 @@ export default class CashRegisterSessionsController {
         withdrawalsResult?.$extras.total || 0,
       );
 
-      // Sumar totalWithdrawals al totalSales actual
-      totalSales = totalSales.plus(totalWithdrawals);
-
       // 4. Calcular el balance esperado con el total de ventas correcto
       const expectedClosingBalance = openingBalance
         .plus(totalSales)
@@ -386,118 +395,157 @@ export default class CashRegisterSessionsController {
   }
 
   /**
-   * Proporciona un resumen operativo de la sesión de caja activa.
+   * Obtiene la configuracion del dia operativo para la sede actual.
+   */
+  public async getBusinessDaySettings({
+    response,
+    companyId,
+    locationId,
+  }: HttpContext) {
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
+    try {
+      const cutoffHour = await getBusinessDayCutoffHour(
+        companyId,
+        locationId,
+      );
+
+      return response.ok({
+        data: {
+          businessTimeZone: BUSINESS_TIME_ZONE,
+          cutoffHour,
+          defaultCutoffHour: DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+        },
+      });
+    } catch (error) {
+      console.error("Error al consultar el dia operativo:", error);
+      return response.internalServerError({
+        message: "No fue posible consultar la configuracion del dia operativo.",
+      });
+    }
+  }
+
+  public async updateBusinessDaySettings({
+    request,
+    response,
+    companyId,
+    locationId,
+  }: HttpContext) {
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
+    const { cutoffHour } = await request.validateUsing(
+      businessDaySettingValidator,
+    );
+
+    try {
+      const openSession = await CashRegisterSession.query()
+        .where("company_id", companyId)
+        .where("status", "open")
+        .whereHas("cashRegister", (query) => {
+          query
+            .where("company_id", companyId)
+            .where("location_id", locationId);
+        })
+        .first();
+
+      if (openSession) {
+        return response.conflict({
+          message:
+            "Cierra la caja activa antes de modificar el dia operativo.",
+        });
+      }
+
+      const savedCutoffHour = await saveBusinessDayCutoffHour(
+        companyId,
+        locationId,
+        cutoffHour,
+      );
+
+      return response.ok({
+        data: {
+          businessTimeZone: BUSINESS_TIME_ZONE,
+          cutoffHour: savedCutoffHour,
+          defaultCutoffHour: DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+        },
+        message: "Configuracion del dia operativo actualizada.",
+      });
+    } catch (error) {
+      console.error("Error al actualizar el dia operativo:", error);
+      return response.internalServerError({
+        message: "No fue posible actualizar la configuracion del dia operativo.",
+      });
+    }
+  }
+
+  /**
+   * Proporciona un resumen del dia operativo para la sede actual.
    */
   public async getDailyBusinessSummary({
     response,
     companyId,
     locationId,
-    cashRegisterSessionId,
   }: HttpContext) {
     try {
-      if (!cashRegisterSessionId) {
+      if (!companyId || !locationId) {
         return response.badRequest({
-          message: "No existe una caja abierta para obtener el resumen.",
+          message: "La compania y la sucursal son requeridas.",
         });
       }
 
-      const [totalMetrics, statusCounts, typeCounts, topProducts] =
-        await Promise.all([
-          // Consulta A: Ingresos totales y comandas válidas
-          Order.query()
-            .where("companyId", companyId!)
-            .where("locationId", locationId!)
-            .whereNotNull("paidAt")
-            .whereNot("status", "cancelled")
-            .where("cashRegisterSessionId", cashRegisterSessionId)
-            .sum("total_amount as totalRevenue")
-            .count("* as totalOrders")
-            .first(),
+      const cutoffHour = await getBusinessDayCutoffHour(
+        companyId,
+        locationId,
+      );
+      const businessDate = getCurrentBusinessDate(cutoffHour);
 
-          // Consulta B: Conteo de comandas por estado (Usa Query Builder, snake_case es correcto aquí)
-          db
-            .from("orders")
-            .where("company_id", companyId!)
-            .where("location_id", locationId!)
-            .where("cash_register_session_id", cashRegisterSessionId)
-            .groupBy("status")
-            .select("status")
-            .count("* as count"),
+      const [report, paidOrders] = await Promise.all([
+        buildSalesReport(
+          companyId,
+          locationId,
+          businessDate,
+          businessDate,
+          cutoffHour,
+        ),
+        getPaidOrdersForRange(
+          companyId,
+          locationId,
+          businessDate,
+          businessDate,
+          cutoffHour,
+        ),
+      ]);
 
-          // Consulta C: Conteo por tipo de orden (mesa vs. llevar)
-          Order.query()
-            .where("companyId", companyId!)
-            .where("locationId", locationId!)
-            .whereNot("status", "cancelled")
-            .where("cashRegisterSessionId", cashRegisterSessionId)
-            .groupBy("orderType")
-            .select("orderType")
-            .count("* as count"),
-
-          // Consulta D: Top 5 productos más vendidos (Usa Query Builder, snake_case es correcto aquí)
-          db
-            .from("order_items")
-            .join("orders", "order_items.order_id", "orders.id")
-            .join("products", "order_items.product_id", "products.id")
-            .join("categories", "products.category_id", "categories.id")
-            .where("orders.company_id", companyId!)
-            .where("orders.location_id", locationId!)
-            .whereNot("orders.status", "cancelled")
-            .where("orders.cash_register_session_id", cashRegisterSessionId)
-            .groupBy("products.name", "categories.id", "categories.name")
-            .select(
-              "products.name",
-              "categories.id as categoryId",
-              "categories.name as categoryName",
-            )
-            .sum("order_items.quantity as count")
-            .orderBy("count", "desc")
-            .limit(5),
-        ]);
-
-      // ✅ SOLUCION: Función para procesar modelos de Lucid correctamente
-      const processLucidCounts = (models: any[], keyField: string) => {
-        return models.reduce((acc, model) => {
-          // Para modelos de Lucid, el campo está en $attributes y el count en $extras
-          const key = model.$attributes[keyField];
-          const count = parseInt(model.$extras.count, 10);
-          acc[key] = count;
-          return acc;
-        }, {});
-      };
-
-      // ✅ SOLUCION: Función para procesar resultados de Query Builder (objetos planos)
-      const processPlainCounts = (rows: any[], keyField: string) => {
-        return rows.reduce((acc, row) => {
-          // Para Query Builder, los campos están directamente en el objeto
-          acc[row[keyField]] = parseInt(row.count, 10);
-          return acc;
-        }, {});
-      };
-
-      // ✅ CORREGIDO: Usar la función correcta para cada tipo de consulta
-      const statusResults = processPlainCounts(statusCounts, "status"); // Query Builder
-      const typeResults = processLucidCounts(typeCounts, "orderType"); // Modelo Lucid
+      const summary = report.summary;
 
       const summaryData = {
-        totalRevenue: new Decimal(
-          totalMetrics?.$extras.totalRevenue || 0,
-        ).toNumber(),
-        totalOrders: parseInt(totalMetrics?.$extras.totalOrders || "0", 10),
-        // ✅ CORREGIDO: Usar las claves correctas según los valores de la BD
-        tableOrders: typeResults["dine_in"] || 0,
-        takeawayOrders: typeResults["takeaway"] || 0,
-        ordersInProcess: statusResults["pending"] || 0,
-        ordersFinished: statusResults["paid"] || 0,
-        ordersCancelled: statusResults["cancelled"] || 0,
-        topProducts: topProducts.map((p) => ({
-          name: p.name,
-          count: parseInt(p.count, 10),
+        businessDate,
+        businessTimeZone: BUSINESS_TIME_ZONE,
+        businessDayCutoffHour: cutoffHour,
+        totalRevenue: summary.totalSales,
+        totalOrders: summary.totalOrders,
+        tableOrders: summary.tableOrders,
+        takeawayOrders: summary.takeawayOrders,
+        ordersInProcess: summary.inProcessOrders,
+        ordersFinished: summary.totalOrders,
+        ordersCancelled: summary.cancelledOrders,
+        topProducts: report.tableRows.slice(0, 5).map((product) => ({
+          name: product.productName,
+          count: product.quantity,
           category: {
-            id: p.categoryId,
-            name: p.categoryName,
+            name: product.category,
           },
         })),
+        financialSummary: summary,
+        cuts: report.cuts,
+        paidOrders,
       };
 
       return response.ok({ data: summaryData });

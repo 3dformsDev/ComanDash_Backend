@@ -216,6 +216,8 @@ export default class TablesController {
 
       // ✅ Buscar la orden asociada a esa mesa y ordenId
       await Order.withCompanyFilter(companyId)
+        .where('id', params.orderId)
+        .where('location_id', locationId!)
         .where('table_id', params.id)
         .update({ isFreedTable: true });
 
@@ -223,10 +225,20 @@ export default class TablesController {
 
       await table.save();
 
-      const updatedOrder = table.orders[0]
-      console.log(updatedOrder);
-      
-      updatedOrder.isFreedTable = true
+      const updatedOrder = await Order.withCompanyFilter(companyId)
+        .where('id', params.orderId)
+        .where('location_id', locationId!)
+        .where('table_id', params.id)
+        .preload('orderItems', (itemQuery: any) => {
+          return itemQuery.preload('product', (productQuery: any) => {
+            return productQuery.preload('category')
+          })
+        })
+        .preload('waiter')
+        .preload('table')
+        .preload('payments')
+        .preload('adjustments')
+        .firstOrFail()
 
       const roomName = `kitchen_room_${companyId}_${locationId}`
       io.to(roomName).emit('order_updated', updatedOrder)
