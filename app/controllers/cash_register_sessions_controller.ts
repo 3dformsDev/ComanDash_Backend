@@ -13,6 +13,7 @@ import {
 import { io } from "#start/socket";
 import {
   buildSalesReport,
+  getCancelledOrdersForRange,
   getPaidOrdersForRange,
 } from "#services/reports/sales_reporting_service";
 import { businessDaySettingValidator } from "#validators/business_day_setting";
@@ -506,7 +507,7 @@ export default class CashRegisterSessionsController {
       );
       const businessDate = getCurrentBusinessDate(cutoffHour);
 
-      const [report, paidOrders] = await Promise.all([
+      const [report, paidOrders, cancelledOrders] = await Promise.all([
         buildSalesReport(
           companyId,
           locationId,
@@ -515,6 +516,13 @@ export default class CashRegisterSessionsController {
           cutoffHour,
         ),
         getPaidOrdersForRange(
+          companyId,
+          locationId,
+          businessDate,
+          businessDate,
+          cutoffHour,
+        ),
+        getCancelledOrdersForRange(
           companyId,
           locationId,
           businessDate,
@@ -546,6 +554,7 @@ export default class CashRegisterSessionsController {
         financialSummary: summary,
         cuts: report.cuts,
         paidOrders,
+        cancelledOrders,
       };
 
       return response.ok({ data: summaryData });

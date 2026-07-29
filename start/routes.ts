@@ -25,6 +25,7 @@ import OrderPaymentsController from '#controllers/order_payments_controller';
 import NotificationsController from '#controllers/notifications_controller';
 import ReportsController from '#controllers/reports_controller';
 import ReceiptsController from '#controllers/receipts_controller';
+import ReceiptBrandingsController from '#controllers/receipt_brandings_controller';
 
 router.get('/', async () => {
   return {
@@ -162,6 +163,30 @@ router.group(() => {
       middleware.companyContext(),
     ])
 
+  router.get('receipt-branding', [ReceiptBrandingsController, 'show'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.get('receipt-branding/logo', [ReceiptBrandingsController, 'image'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.put('receipt-branding/logo', [ReceiptBrandingsController, 'update'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.delete('receipt-branding/logo', [ReceiptBrandingsController, 'destroy'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
 
   router.resource('cashregisters', CashRegistersController)
     .middleware('*', [
@@ -270,6 +295,12 @@ router.group(() => {
     ])
 
   //Reportes
+  router.get('/reports/daily-orders', [ReportsController, 'dailyOrdersReport'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext()
+    ])
+
   router.get('/reports/sales', [ReportsController, 'salesReport'])
     .middleware([
       middleware.auth(),

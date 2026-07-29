@@ -3,9 +3,9 @@ import Order from "#models/order";
 import OrderAdjustment from "#models/order_adjustment";
 
 export default class ReceiptPdfService {
-  public static async generate(order: Order) {
+  public static async generate(order: Order, logoBuffer?: Buffer) {
     const doc = new PDFDocument({
-      size: [226, 800],
+      size: [226, logoBuffer ? 864 : 800],
       margins: {
         top: 20,
         bottom: 20,
@@ -30,6 +30,21 @@ export default class ReceiptPdfService {
       /* ===================================================== */
 
       const company: any = order.company;
+
+      if (logoBuffer) {
+        const logoTop = doc.y;
+
+        try {
+          doc.image(logoBuffer, (226 - 85) / 2, logoTop, {
+            fit: [85, 60],
+            align: "center",
+            valign: "center",
+          });
+          doc.y = logoTop + 64;
+        } catch (error) {
+          console.warn("No se pudo incrustar el logo en el recibo:", error);
+        }
+      }
 
       doc
         .fontSize(22)

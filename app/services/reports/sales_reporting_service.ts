@@ -335,7 +335,80 @@ export async function getPaidOrdersForRange(
     )
     .preload("waiter")
     .preload("table")
-    .preload("payments")
+    .preload("payments", (query) =>
+      query.preload("paymentMethod", (paymentMethodQuery) =>
+        paymentMethodQuery.select("id", "name", "type"),
+      ),
+    )
     .preload("adjustments")
     .orderBy("paid_at", "desc");
+}
+
+export async function getCancelledOrdersForRange(
+  companyId: number,
+  locationId: number,
+  startDate: string,
+  endDate: string,
+  cutoffHour: number = DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+) {
+  const range = getBusinessDateRange(startDate, endDate, cutoffHour);
+
+  return Order.query()
+    .where("company_id", companyId)
+    .where("location_id", locationId)
+    .where("status", "cancelled")
+    .whereNotNull("cancelled_at")
+    .whereBetween("cancelled_at", [range.startSql, range.endSql])
+    .preload("orderItems", (query) =>
+      query.preload("product", (productQuery) =>
+        productQuery.preload("category"),
+      ),
+    )
+    .preload("waiter")
+    .preload("table")
+    .preload("payments", (query) =>
+      query.preload("paymentMethod", (paymentMethodQuery) =>
+        paymentMethodQuery.select("id", "name", "type"),
+      ),
+    )
+    .preload("adjustments")
+    .orderBy("cancelled_at", "desc");
+}
+
+export async function buildDailyOrdersReport(
+  companyId: number,
+  locationId: number,
+  businessDate: string,
+  cutoffHour: number = DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+) {
+  const [report, paidOrders, cancelledOrders] = await Promise.all([
+    buildSalesReport(
+      companyId,
+      locationId,
+      businessDate,
+      businessDate,
+      cutoffHour,
+    ),
+    getPaidOrdersForRange(
+      companyId,
+      locationId,
+      businessDate,
+      businessDate,
+      cutoffHour,
+    ),
+    getCancelledOrdersForRange(
+      companyId,
+      locationId,
+      businessDate,
+      businessDate,
+      cutoffHour,
+    ),
+  ]);
+
+  return {
+    ...report,
+    businessDate,
+    paidOrders,
+    cancelledOrders,
+  };
 }

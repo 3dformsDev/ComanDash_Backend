@@ -10,3 +10,9 @@ export const salesReportValidator = vine.compile(
     endDate: vine.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
   }),
 );
+
+export const dailyOrdersReportValidator = vine.compile(
+  vine.object({
+    date: vine.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+  }),
+);

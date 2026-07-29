@@ -341,6 +341,12 @@ export default class OrdersController {
           })
           .preload("waiter")
           .preload("table") // Para que sepan el número de mesa
+          .preload("payments", (paymentQuery) => {
+            paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
+              paymentMethodQuery.select("id", "name", "type");
+            });
+          })
+          .preload("adjustments")
           .firstOrFail();
 
         const roomName = `kitchen_room_${companyId}_${locationId}`;
@@ -377,7 +383,11 @@ export default class OrdersController {
         .where("id", order.id)
         .preload("orderItems")
         .preload("waiter")
-        .preload("payments")
+        .preload("payments", (paymentQuery) => {
+          paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
+            paymentMethodQuery.select("id", "name", "type");
+          });
+        })
         .preload("adjustments")
         .first();
 
@@ -774,7 +784,11 @@ export default class OrdersController {
             query.preload("product", (p) => p.preload("category")),
           )
           .preload("waiter")
-          .preload("payments")
+          .preload("payments", (paymentQuery) => {
+            paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
+              paymentMethodQuery.select("id", "name", "type");
+            });
+          })
           .preload("table")
           .preload("adjustments")
           .first();
@@ -1637,7 +1651,11 @@ export default class OrdersController {
         })
         .preload("waiter")
         .preload("table")
-        .preload("payments")
+        .preload("payments", (query) => {
+          query.preload("paymentMethod", (paymentMethodQuery) => {
+            paymentMethodQuery.select("id", "name", "type");
+          });
+        })
         .preload("adjustments")
         .orderBy("created_at", "asc");
 

@@ -236,7 +236,11 @@ export default class TablesController {
         })
         .preload('waiter')
         .preload('table')
-        .preload('payments')
+        .preload('payments', (paymentQuery) => {
+          paymentQuery.preload('paymentMethod', (paymentMethodQuery) => {
+            paymentMethodQuery.select('id', 'name', 'type')
+          })
+        })
         .preload('adjustments')
         .firstOrFail()
 

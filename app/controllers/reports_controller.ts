@@ -5,12 +5,60 @@ import {
   operationalDateTimeExpression,
   utcColumnInBusinessTime,
 } from "#services/reports/business_day_service";
-import { buildSalesReport } from "#services/reports/sales_reporting_service";
-import { salesReportValidator } from "#validators/sales_report";
+import {
+  buildDailyOrdersReport,
+  buildSalesReport,
+} from "#services/reports/sales_reporting_service";
+import {
+  dailyOrdersReportValidator,
+  salesReportValidator,
+} from "#validators/sales_report";
 import type { HttpContext } from "@adonisjs/core/http";
 import db from "@adonisjs/lucid/services/db";
 
 export default class ReportsController {
+  public async dailyOrdersReport({
+    request,
+    response,
+    companyId,
+    locationId,
+  }: HttpContext) {
+    const { date } = await request.validateUsing(dailyOrdersReportValidator);
+
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
+    try {
+      const cutoffHour = await getBusinessDayCutoffHour(
+        companyId,
+        locationId,
+      );
+      const report = await buildDailyOrdersReport(
+        companyId,
+        locationId,
+        date,
+        cutoffHour,
+      );
+
+      return response.ok({
+        status: "success",
+        data: report,
+      });
+    } catch (error) {
+      if (error instanceof RangeError) {
+        return response.badRequest({ message: error.message });
+      }
+
+      console.error("Error generando reporte diario de comandas:", error);
+      return response.internalServerError({
+        message: "Ocurrio un error al procesar el reporte diario.",
+      });
+    }
+  }
+
   public async salesReport({
     request,
     response,

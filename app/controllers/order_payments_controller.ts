@@ -92,7 +92,12 @@ export default class OrderPaymentsController {
           });
         })
         .preload("table")
-        .preload("payments")
+        .preload("waiter")
+        .preload("payments", (paymentQuery) => {
+          paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
+            paymentMethodQuery.select("id", "name", "type");
+          });
+        })
         .preload("adjustments")
         .first();
 
@@ -290,6 +295,12 @@ export default class OrderPaymentsController {
             { client: trx },
           );
         }
+
+        await order.load("payments", (paymentQuery) => {
+          paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
+            paymentMethodQuery.select("id", "name", "type");
+          });
+        });
 
         await trx.commit();
 

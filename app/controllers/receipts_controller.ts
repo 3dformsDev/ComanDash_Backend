@@ -1,6 +1,7 @@
 import type { HttpContext } from "@adonisjs/core/http";
 
 import Order from "#models/order";
+import CompanyReceiptBranding from "#models/company_receipt_branding";
 import ReceiptPdfService from "#services/pdf/receipt_pdf_service";
 
 export default class ReceiptsController {
@@ -30,7 +31,22 @@ export default class ReceiptsController {
       .preload("company")
       .firstOrFail();
 
-    const pdfBuffer = await ReceiptPdfService.generate(order);
+    let logoBuffer: Buffer | undefined;
+
+    try {
+      const branding = await CompanyReceiptBranding.find(companyId);
+      logoBuffer = branding?.logoData;
+    } catch (error) {
+      console.warn(
+        "No se pudo cargar el logo del recibo. Se generara sin logo:",
+        error,
+      );
+    }
+
+    const pdfBuffer = await ReceiptPdfService.generate(
+      order,
+      logoBuffer,
+    );
 
     response.header("Content-Type", "application/pdf");
 
