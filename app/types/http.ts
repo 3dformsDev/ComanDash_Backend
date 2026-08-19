@@ -8,6 +8,11 @@ declare module '@adonisjs/core/http' {
     authGuard: string
     currentUser: User
     cashRegisterSessionId?: number
+    cashRegisterBusinessDate?: string
+    cashRegisterIsPreviousBusinessDay?: boolean
+    cashRecoveryIsActive?: boolean
+    cashRecoveryAuthorizedUntil?: string
+    cashTransactionTrx?: any
     getRequestData(): Record<string, any>
     getQueryData(): Record<string, any>
     checkPermission(functionalityCode: string, action?: 'can_access' | 'can_create' | 'can_read' | 'can_update' | 'can_delete'): Promise<boolean>

@@ -8,6 +8,7 @@ import {
 import {
   buildDailyOrdersReport,
   buildSalesReport,
+  businessDateFilter,
 } from "#services/reports/sales_reporting_service";
 import {
   dailyOrdersReportValidator,
@@ -127,9 +128,9 @@ export default class ReportsController {
       );
       const range = getBusinessDateRange(startDate, endDate, cutoffHour);
       const createdAtInBusinessTime =
-        utcColumnInBusinessTime("created_at");
+        utcColumnInBusinessTime("orders.created_at");
       const createdAtInOperationalTime = operationalDateTimeExpression(
-        "created_at",
+        "orders.created_at",
         cutoffHour,
       );
 
@@ -139,7 +140,16 @@ export default class ReportsController {
         .where("location_id", locationId)
         .where("status", "paid")
         .whereNotNull("paid_at")
-        .whereBetween("created_at", [range.startSql, range.endSql])
+        .whereRaw(
+          ...businessDateFilter(
+            "orders.business_date",
+            "orders.created_at",
+            range,
+          ),
+        )
+        .whereRaw(
+          `(orders.business_date IS NULL OR orders.business_date = DATE(${createdAtInOperationalTime}))`,
+        )
         .groupByRaw(`HOUR(${createdAtInBusinessTime})`)
         .select(
           db.raw(`HOUR(${createdAtInBusinessTime}) as hour`),
@@ -153,7 +163,16 @@ export default class ReportsController {
         .where("location_id", locationId)
         .where("status", "paid")
         .whereNotNull("paid_at")
-        .whereBetween("created_at", [range.startSql, range.endSql])
+        .whereRaw(
+          ...businessDateFilter(
+            "orders.business_date",
+            "orders.created_at",
+            range,
+          ),
+        )
+        .whereRaw(
+          `(orders.business_date IS NULL OR orders.business_date = DATE(${createdAtInOperationalTime}))`,
+        )
         .groupByRaw(`DAYOFWEEK(${createdAtInOperationalTime})`)
         .groupByRaw(`DAYNAME(${createdAtInOperationalTime})`)
         .select(

@@ -11,6 +11,7 @@ import {
   utcColumnInBusinessTime,
 } from "#services/reports/business_day_service";
 import { DateTime } from "luxon";
+import { businessDateFilter } from "#services/reports/sales_reporting_service";
 
 test.group("Sales reporting business dates", () => {
   test("uses the 4 a.m. default cutoff in Colombia", ({ assert }) => {
@@ -83,5 +84,25 @@ test.group("Sales reporting business dates", () => {
       () => getBusinessDateRange("2026-07-20", "2026-07-18", 4),
       "El rango de fechas no es valido.",
     );
+  });
+
+  test("prefers stored business dates and preserves the legacy timestamp fallback", ({ assert }) => {
+    const range = getBusinessDateRange("2026-07-18", "2026-07-20", 4);
+    const [sql, bindings] = businessDateFilter(
+      "orders.paid_business_date",
+      "orders.paid_at",
+      range,
+    );
+
+    assert.equal(
+      sql,
+      "(orders.paid_business_date BETWEEN ? AND ? OR (orders.paid_business_date IS NULL AND orders.paid_at BETWEEN ? AND ?))",
+    );
+    assert.deepEqual(bindings, [
+      "2026-07-18",
+      "2026-07-20",
+      "2026-07-18 09:00:00",
+      "2026-07-21 08:59:59",
+    ]);
   });
 });

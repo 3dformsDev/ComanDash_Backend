@@ -19,6 +19,22 @@ function toNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function businessDateFilter(
+  businessDateColumn: string,
+  timestampColumn: string,
+  range: {
+    startDate: string;
+    endDate: string;
+    startSql: string;
+    endSql: string;
+  },
+): [string, Array<string>] {
+  return [
+    `(${businessDateColumn} BETWEEN ? AND ? OR (${businessDateColumn} IS NULL AND ${timestampColumn} BETWEEN ? AND ?))`,
+    [range.startDate, range.endDate, range.startSql, range.endSql],
+  ];
+}
+
 export async function buildSalesReport(
   companyId: number,
   locationId: number,
@@ -31,6 +47,8 @@ export async function buildSalesReport(
     "orders.paid_at",
     range.cutoffHour,
   );
+  const paidBusinessDateExpression =
+    `COALESCE(orders.paid_business_date, DATE(${paidAtInOperationalTime}))`;
 
   const totalsQuery = db
     .from("orders")
@@ -38,7 +56,13 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
     .select(
       db.raw("COUNT(orders.id) as totalOrders"),
       db.raw("COALESCE(SUM(orders.total_amount), 0) as totalSales"),
@@ -58,7 +82,13 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
     .sum("order_items.total_price as total")
     .first();
 
@@ -69,7 +99,13 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
     .groupBy("order_adjustments.type")
     .select("order_adjustments.type")
     .sum("order_adjustments.amount as total");
@@ -79,7 +115,13 @@ export async function buildSalesReport(
     .join("orders", "order_payments.order_id", "orders.id")
     .where("orders.company_id", companyId)
     .where("orders.location_id", locationId)
-    .whereBetween("order_payments.processed_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "order_payments.business_date",
+        "order_payments.processed_at",
+        range,
+      ),
+    )
     .select(
       db.raw(
         "COALESCE(SUM(CASE WHEN order_payments.amount > 0 THEN order_payments.amount ELSE 0 END), 0) as paymentsReceived",
@@ -101,7 +143,13 @@ export async function buildSalesReport(
     )
     .where("orders.company_id", companyId)
     .where("orders.location_id", locationId)
-    .whereBetween("order_payments.processed_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "order_payments.business_date",
+        "order_payments.processed_at",
+        range,
+      ),
+    )
     .groupBy("payment_methods.id", "payment_methods.name")
     .select(
       "payment_methods.id",
@@ -122,10 +170,16 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
-    .groupByRaw(`DATE(${paidAtInOperationalTime})`)
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
+    .groupByRaw(paidBusinessDateExpression)
     .select(
-      db.raw(`DATE(${paidAtInOperationalTime}) as day`),
+      db.raw(`${paidBusinessDateExpression} as day`),
       db.raw("COUNT(orders.id) as orderCount"),
       db.raw("COALESCE(SUM(orders.total_amount), 0) as total"),
     )
@@ -140,7 +194,13 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
     .groupBy("categories.id", "categories.name")
     .select("categories.name as label")
     .sum("order_items.total_price as total")
@@ -155,7 +215,13 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
     .groupBy("products.id", "products.name", "categories.id", "categories.name")
     .select(
       "products.name as productName",
@@ -182,7 +248,13 @@ export async function buildSalesReport(
     .where("orders.location_id", locationId)
     .where("orders.status", "paid")
     .whereNotNull("orders.paid_at")
-    .whereBetween("orders.paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
     .groupBy(
       "cash_register_sessions.id",
       "cash_register_sessions.status",
@@ -211,7 +283,13 @@ export async function buildSalesReport(
     .where("location_id", locationId)
     .where("status", "cancelled")
     .whereNotNull("cancelled_at")
-    .whereBetween("cancelled_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "cancelled_business_date",
+        "cancelled_at",
+        range,
+      ),
+    )
     .count("id as total")
     .first();
 
@@ -220,7 +298,9 @@ export async function buildSalesReport(
     .where("company_id", companyId)
     .where("location_id", locationId)
     .whereNotIn("status", ["paid", "cancelled"])
-    .whereBetween("created_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter("business_date", "created_at", range),
+    )
     .count("id as total")
     .first();
 
@@ -327,7 +407,9 @@ export async function getPaidOrdersForRange(
     .where("location_id", locationId)
     .where("status", "paid")
     .whereNotNull("paid_at")
-    .whereBetween("paid_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter("paid_business_date", "paid_at", range),
+    )
     .preload("orderItems", (query) =>
       query.preload("product", (productQuery) =>
         productQuery.preload("category"),
@@ -358,7 +440,13 @@ export async function getCancelledOrdersForRange(
     .where("location_id", locationId)
     .where("status", "cancelled")
     .whereNotNull("cancelled_at")
-    .whereBetween("cancelled_at", [range.startSql, range.endSql])
+    .whereRaw(
+      ...businessDateFilter(
+        "cancelled_business_date",
+        "cancelled_at",
+        range,
+      ),
+    )
     .preload("orderItems", (query) =>
       query.preload("product", (productQuery) =>
         productQuery.preload("category"),

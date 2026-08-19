@@ -28,6 +28,7 @@ export default class ReceiptsController {
         query.preload("paymentMethod");
       })
       .preload("adjustments")
+      .preload("cashRegisterSession")
       .preload("company")
       .firstOrFail();
 

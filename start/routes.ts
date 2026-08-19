@@ -100,6 +100,7 @@ router.group(() => {
       middleware.auth(),
       middleware.companyContext(),
       middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
     ])
 
   router.get('orders/kitchen/pending', [OrdersController, 'getPendingFotKitchen'])
@@ -136,10 +137,16 @@ router.group(() => {
       middleware.companyContext(),
     ])
     .middleware('store', [
-      middleware.ensureCashRegisterIsOpen()
+      middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
     ])
     .middleware('update', [
-      middleware.ensureCashRegisterIsOpen()
+      middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
+    ])
+    .middleware('destroy', [
+      middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
     ])
 
   router.resource('orderpayments', OrderPaymentsController)
@@ -148,10 +155,12 @@ router.group(() => {
       middleware.companyContext(),
     ])
     .middleware('store', [
-      middleware.ensureCashRegisterIsOpen()
+      middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
     ])
     .middleware('update', [
-      middleware.ensureCashRegisterIsOpen()
+      middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
     ])
 
     router.get(
@@ -216,6 +225,24 @@ router.group(() => {
       middleware.companyContext(),
     ])
 
+  router.get('cashregistersessions/operating-state', [CashRegisterSessionsController, 'getOperatingState'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.post('cashregistersessions/:id/recovery', [CashRegisterSessionsController, 'authorizeRecovery'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.delete('cashregistersessions/:id/recovery', [CashRegisterSessionsController, 'endRecovery'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
   router.post('cashregistersessions/:id/close', [CashRegisterSessionsController, 'closeSession'])
     .middleware([
       middleware.auth(),
@@ -238,7 +265,8 @@ router.group(() => {
       middleware.companyContext(),
     ])
     .middleware('store', [
-      middleware.ensureCashRegisterIsOpen()
+      middleware.ensureCashRegisterIsOpen(),
+      middleware.ensureCashTransactionAllowed(),
     ])
 
   router.resource('locations', LocationsController)

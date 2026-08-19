@@ -22,6 +22,9 @@ export default class OrderPayment extends TenantBase {
   @column()
   declare cashRegisterSessionId: number | null
 
+  @column.date()
+  declare businessDate?: DateTime | null
+
   @column()
   declare amount: number
 

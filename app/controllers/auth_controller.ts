@@ -12,6 +12,8 @@ import DeviceToken from '#models/device_token'
 import CashRegisterSession from '#models/cash_registers_session'
 import env from '#start/env'
 
+const ACCESS_TOKEN_EXPIRATION = '8 hours'
+
 export default class AuthController {
   /**
    * Login del usuario
@@ -103,7 +105,7 @@ export default class AuthController {
 
       // Generar token nuevo
       const token = await User.accessTokens.create(user, ['*'], {
-        expiresIn: '4 hours',
+        expiresIn: ACCESS_TOKEN_EXPIRATION,
       })
 
       // Preparar permisos para la respuesta
@@ -250,7 +252,7 @@ export default class AuthController {
 
       // Generar token
       const token = await User.accessTokens.create(user, ['*'], {
-        expiresIn: '4 hours',
+        expiresIn: ACCESS_TOKEN_EXPIRATION,
       })
 
       // Preparar permisos para la respuesta
@@ -456,7 +458,7 @@ export default class AuthController {
 
       // Crea un nuevo token.
       const token = await User.accessTokens.create(user, ['*'], {
-        expiresIn: '4 hours',
+        expiresIn: ACCESS_TOKEN_EXPIRATION,
       })
 
       // Devuelve el nuevo token y los datos del usuario, igual que en el login.

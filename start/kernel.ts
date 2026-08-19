@@ -47,5 +47,6 @@ export const middleware = router.named({
   permission: () => import('#middleware/permission_middleware'),
   companyContext: () => import('#middleware/company_context_middleware'),
   permissionAll: () => import('#middleware/permission_all_middleware'),
-  ensureCashRegisterIsOpen: () => import('#middleware/ensure_cash_register_is_open_middleware')
+  ensureCashRegisterIsOpen: () => import('#middleware/ensure_cash_register_is_open_middleware'),
+  ensureCashTransactionAllowed: () => import('#middleware/ensure_cash_transaction_allowed_middleware')
 })

@@ -33,6 +33,21 @@ export default class CashRegisterSession extends TenantBase {
   @column()
   declare status: 'open' | 'closed'
 
+  @column.date()
+  declare businessDate?: DateTime | null
+
+  @column()
+  declare businessDayCutoffHour?: number | null
+
+  @column.dateTime()
+  declare recoveryAuthorizedUntil?: DateTime | null
+
+  @column()
+  declare recoveryAuthorizedBy?: number | null
+
+  @column()
+  declare recoveryReason?: string | null
+
   @column.dateTime()
   declare openedAt: DateTime
 

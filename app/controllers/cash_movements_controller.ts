@@ -1,6 +1,9 @@
 import CashMovement from '#models/cash_movement'
 import { createCashMovementValidator } from '#validators/cash_movement'
 import type { HttpContext } from '@adonisjs/core/http'
+import db from '@adonisjs/lucid/services/db'
+import { DateTime } from 'luxon'
+import CashRegisterOperatingService from '#services/cash_register_operating_service'
 
 export default class CashMovementsController {
   /**
@@ -31,18 +34,53 @@ export default class CashMovementsController {
   /**
     * Create a new location for the authenticated user's company.
     */
-  async store({ request, response, companyId, currentUser, cashRegisterSessionId }: HttpContext) {
+  async store({
+    request,
+    response,
+    companyId,
+    currentUser,
+    cashRegisterSessionId,
+    cashRegisterBusinessDate,
+    cashRecoveryIsActive,
+    cashRecoveryAuthorizedUntil,
+    cashTransactionTrx,
+  }: HttpContext) {
+    const trx = cashTransactionTrx || await db.transaction()
     try {
       const payload = await request.validateUsing(createCashMovementValidator(companyId))
       const location = await CashMovement.create({
         ...payload,
         companyId,
         userId: currentUser.id,
-        cashRegisterSessionId
-      })
+        cashRegisterSessionId,
+        businessDate: cashRegisterBusinessDate
+          ? DateTime.fromISO(cashRegisterBusinessDate)
+          : undefined,
+      }, { client: trx })
+
+      await new CashRegisterOperatingService().logRecoveryActivity(
+        {
+          companyId,
+          userId: currentUser.id,
+          cashRegisterSessionId,
+          cashRegisterBusinessDate,
+          cashRecoveryIsActive,
+          cashRecoveryAuthorizedUntil,
+          ipAddress: request.ip(),
+          userAgent: request.header('user-agent'),
+        },
+        'cash_recovery_cash_movement_created',
+        'cash_movement',
+        location.id,
+        { movementType: location.movementType, amount: location.amount },
+        trx,
+      )
+
+      await trx.commit()
 
       return response.created(location)
     } catch (error) {
+      await trx.rollback()
       if (error.code === 'E_VALIDATION_ERROR' || error.code === 'E_VALIDATION_FAILURE') {
         return response.unprocessableEntity({ errors: error.messages })
       }

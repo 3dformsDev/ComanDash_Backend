@@ -21,6 +21,11 @@ import firebaseService from "#services/firebase_service";
 import cache from "@adonisjs/cache/services/main";
 import OrderAdjustmentService from "#services/orders/order_adjustment_service";
 import OrderAdjustment from "#models/order_adjustment";
+import CashRegisterOperatingService from "#services/cash_register_operating_service";
+
+function businessDateValue(value?: string): DateTime | undefined {
+  return value ? DateTime.fromISO(value) : undefined;
+}
 
 export default class OrdersController {
   /**
@@ -121,9 +126,13 @@ export default class OrdersController {
     auth,
     companyId,
     cashRegisterSessionId,
+    cashRegisterBusinessDate,
+    cashRecoveryIsActive,
+    cashRecoveryAuthorizedUntil,
     locationId,
+    cashTransactionTrx,
   }: HttpContext) {
-    const trx = await db.transaction();
+    const trx = cashTransactionTrx || await db.transaction();
 
     try {
       const payload = await request.validateUsing(
@@ -169,6 +178,7 @@ export default class OrdersController {
         locationId,
         waiterId: auth.user!.id,
         cashRegisterSessionId,
+        businessDate: businessDateValue(cashRegisterBusinessDate),
         orderNumber: nextOrderNumber.toString(),
         company_order_number: nextCompanyOrderNumber,
         subtotal: 0, // Se actualizará después
@@ -281,6 +291,7 @@ export default class OrdersController {
             auth.user!.id,
             amount,
             payment.notesPayment || notesPayment || "Pago anticipado",
+            cashRegisterBusinessDate,
             trx,
           );
 
@@ -292,6 +303,7 @@ export default class OrdersController {
             amount,
             "sale",
             `Venta realizada en órdenes para órden ${order!.orderNumber}`,
+            cashRegisterBusinessDate,
             trx,
           );
         }
@@ -299,6 +311,7 @@ export default class OrdersController {
         await order
           .merge({
             paidAt: DateTime.now(),
+            paidBusinessDate: businessDateValue(cashRegisterBusinessDate),
             status: "paid" as const,
           })
           .save();
@@ -314,6 +327,24 @@ export default class OrdersController {
           { client: trx },
         );
       }
+
+      await new CashRegisterOperatingService().logRecoveryActivity(
+        {
+          companyId,
+          userId: auth.user!.id,
+          cashRegisterSessionId,
+          cashRegisterBusinessDate,
+          cashRecoveryIsActive,
+          cashRecoveryAuthorizedUntil,
+          ipAddress: request.ip(),
+          userAgent: request.header("user-agent"),
+        },
+        "cash_recovery_order_created",
+        "order",
+        order.id,
+        { orderNumber: order.orderNumber },
+        trx,
+      );
 
       await trx.commit();
 
@@ -452,8 +483,14 @@ export default class OrdersController {
     auth,
     companyId,
     locationId,
+    cashRegisterSessionId,
+    cashRegisterBusinessDate,
+    cashRegisterIsPreviousBusinessDay,
+    cashRecoveryIsActive,
+    cashRecoveryAuthorizedUntil,
+    cashTransactionTrx,
   }: HttpContext) {
-    const MAX_RETRIES = 3;
+    const MAX_RETRIES = cashTransactionTrx ? 1 : 3;
     const BASE_DELAY = 100; // milliseconds
 
     const payload = await request.validateUsing(
@@ -481,7 +518,7 @@ export default class OrdersController {
       let trx: any = null;
 
       try {
-        trx = await db.transaction();
+        trx = cashTransactionTrx || await db.transaction();
 
         const order = await Order.query({ client: trx })
           .where("id", params.id)
@@ -493,6 +530,18 @@ export default class OrdersController {
           })
           .preload("waiter")
           .firstOrFail();
+
+        if (
+          cashRegisterIsPreviousBusinessDay &&
+          order.cashRegisterSessionId !== cashRegisterSessionId
+        ) {
+          await trx.rollback();
+          return response.conflict({
+            message:
+              "En modo recuperacion solo se pueden modificar comandas de la caja anterior activa.",
+            code: "CASH_RECOVERY_ORDER_SESSION_MISMATCH",
+          });
+        }
 
         if (order.status === "cancelled") {
           await trx.rollback();
@@ -682,6 +731,7 @@ export default class OrdersController {
                 auth.user!.id,
                 priceDelta.toNumber(),
                 notesPayment,
+                cashRegisterBusinessDate,
                 trx,
               );
               await this.addCashMovementPayment(
@@ -692,6 +742,7 @@ export default class OrdersController {
                 priceDelta.toNumber(),
                 "sale",
                 `Pago adicional - Orden #${order.orderNumber}`,
+                cashRegisterBusinessDate,
                 trx,
               );
               await OrderStatusHistory.create(
@@ -713,6 +764,7 @@ export default class OrdersController {
                 auth.user!.id,
                 priceDelta.toNumber(),
                 notesPayment || "Reembolso por eliminación de producto",
+                cashRegisterBusinessDate,
                 trx,
               );
               await this.addCashMovementPayment(
@@ -723,6 +775,7 @@ export default class OrdersController {
                 refundAmount.toNumber(),
                 "withdrawal",
                 `Reembolso - Orden #${order.orderNumber}`,
+                cashRegisterBusinessDate,
                 trx,
               );
               await OrderStatusHistory.create(
@@ -774,6 +827,24 @@ export default class OrdersController {
         await Order.query({ client: trx })
           .where("id", order.id)
           .update(orderUpdateData);
+
+        await new CashRegisterOperatingService().logRecoveryActivity(
+          {
+            companyId,
+            userId: auth.user!.id,
+            cashRegisterSessionId,
+            cashRegisterBusinessDate,
+            cashRecoveryIsActive,
+            cashRecoveryAuthorizedUntil,
+            ipAddress: request.ip(),
+            userAgent: request.header("user-agent"),
+          },
+          "cash_recovery_order_updated",
+          "order",
+          order.id,
+          { orderNumber: order.orderNumber },
+          trx,
+        );
 
         await trx.commit();
 
@@ -896,8 +967,14 @@ export default class OrdersController {
     companyId,
     auth,
     locationId,
+    cashRegisterSessionId,
+    cashRegisterBusinessDate,
+    cashRegisterIsPreviousBusinessDay,
+    cashRecoveryIsActive,
+    cashRecoveryAuthorizedUntil,
+    cashTransactionTrx,
   }: HttpContext) {
-    const trx = await db.transaction();
+    const trx = cashTransactionTrx || await db.transaction();
     try {
       const payload = await request.validateUsing(
         cancelOrderValidator(companyId),
@@ -915,6 +992,18 @@ export default class OrdersController {
         )
         .preload("waiter")
         .firstOrFail();
+
+      if (
+        cashRegisterIsPreviousBusinessDay &&
+        order.cashRegisterSessionId !== cashRegisterSessionId
+      ) {
+        await trx.rollback();
+        return response.conflict({
+          message:
+            "En modo recuperacion solo se pueden cancelar comandas de la caja anterior activa.",
+          code: "CASH_RECOVERY_ORDER_SESSION_MISMATCH",
+        });
+      }
 
       if (order.status === "cancelled") {
         await trx.rollback();
@@ -988,6 +1077,7 @@ export default class OrdersController {
           auth.user!.id,
           amountAlreadyPaid.negated().toNumber(), // <- Monto negativo
           payload.reason || "Reembolso por cancelación de orden",
+          cashRegisterBusinessDate,
           trx,
         );
 
@@ -1000,6 +1090,7 @@ export default class OrdersController {
           amountAlreadyPaid.toNumber(), // <- Monto positivo
           "withdrawal",
           `Reembolso por cancelación - Orden #${order.orderNumber}`,
+          cashRegisterBusinessDate,
           trx,
         );
       }
@@ -1007,6 +1098,9 @@ export default class OrdersController {
       // Actualizar el estado de la orden a "cancelada"
       order.status = "cancelled";
       order.cancelledAt = DateTime.now();
+      order.cancelledBusinessDate = businessDateValue(
+        cashRegisterBusinessDate,
+      );
       await order.save();
 
       // --- AÑADIR ESTA LÍNEA AQUÍ ---
@@ -1031,6 +1125,24 @@ export default class OrdersController {
       if (order.orderType === "dine_in" && order.tableId) {
         await this.updateTableStatus(order.tableId, trx);
       }
+
+      await new CashRegisterOperatingService().logRecoveryActivity(
+        {
+          companyId,
+          userId: auth.user!.id,
+          cashRegisterSessionId,
+          cashRegisterBusinessDate,
+          cashRecoveryIsActive,
+          cashRecoveryAuthorizedUntil,
+          ipAddress: request.ip(),
+          userAgent: request.header("user-agent"),
+        },
+        "cash_recovery_order_cancelled",
+        "order",
+        order.id,
+        { orderNumber: order.orderNumber },
+        trx,
+      );
 
       await trx.commit();
 
@@ -1195,14 +1307,22 @@ export default class OrdersController {
     userId: number,
     additionalAmount: number,
     notes?: string,
-    trx?: any,
+    businessDateOrTrx?: string | any,
+    maybeTrx?: any,
   ): Promise<{ successPayment: boolean }> {
     try {
+      const businessDate =
+        typeof businessDateOrTrx === "string" ? businessDateOrTrx : undefined;
+      const trx = businessDate ? maybeTrx : businessDateOrTrx;
+      const effectiveBusinessDate =
+        businessDateValue(businessDate) ||
+        (await this.getSessionBusinessDate(cashRegisterSessionId, trx));
       await OrderPayment.create(
         {
           orderId,
           paymentMethodId,
           cashRegisterSessionId,
+          businessDate: effectiveBusinessDate,
           amount: additionalAmount, // Solo el monto adicional, no recalcular todo
           processedBy: userId,
           processedAt: DateTime.now(),
@@ -1413,11 +1533,18 @@ export default class OrdersController {
     cashRegisterSessionId: number,
     userId: number,
     notes?: string,
-    trx?: any,
+    businessDateOrTrx?: string | any,
+    maybeTrx?: any,
   ): Promise<{ successPayment: boolean; totalAmountPayed: number }> {
     let totalAmount = new Decimal(0);
 
     try {
+      const businessDate =
+        typeof businessDateOrTrx === "string" ? businessDateOrTrx : undefined;
+      const trx = businessDate ? maybeTrx : businessDateOrTrx;
+      const effectiveBusinessDate =
+        businessDateValue(businessDate) ||
+        (await this.getSessionBusinessDate(cashRegisterSessionId, trx));
       // CORRECCIÓN: Usar la transacción si está disponible
       const query = OrderItem.query().where("order_id", orderId);
       if (trx) {
@@ -1437,6 +1564,7 @@ export default class OrdersController {
           orderId,
           paymentMethodId,
           cashRegisterSessionId,
+          businessDate: effectiveBusinessDate,
           amount: totalAmount.toNumber(),
           processedBy: userId,
           processedAt: DateTime.now(),
@@ -1475,16 +1603,24 @@ export default class OrdersController {
     amount: number,
     movementType?: "sale" | "withdrawal" | "deposit",
     notes?: string,
-    trx?: any,
+    businessDateOrTrx?: string | any,
+    maybeTrx?: any,
   ): Promise<{
     successPaymentCashMovement: boolean;
     totalAmountPayed: number;
   }> {
     try {
+      const businessDate =
+        typeof businessDateOrTrx === "string" ? businessDateOrTrx : undefined;
+      const trx = businessDate ? maybeTrx : businessDateOrTrx;
+      const effectiveBusinessDate =
+        businessDateValue(businessDate) ||
+        (await this.getSessionBusinessDate(cashRegisterSessionId, trx));
       await CashMovement.create(
         {
           companyId,
           cashRegisterSessionId,
+          businessDate: effectiveBusinessDate,
           orderId,
           userId,
           movementType,
@@ -1502,6 +1638,19 @@ export default class OrdersController {
       // Dejar que la transacción principal maneje el rollback
       throw error;
     }
+  }
+
+  private async getSessionBusinessDate(
+    cashRegisterSessionId: number,
+    trx?: any,
+  ): Promise<DateTime | undefined> {
+    const session = await CashRegisterSession.query(
+      trx ? { client: trx } : undefined,
+    )
+      .where("id", cashRegisterSessionId)
+      .first();
+
+    return session?.businessDate || undefined;
   }
 
   /**

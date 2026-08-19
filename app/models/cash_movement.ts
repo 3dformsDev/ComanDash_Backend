@@ -17,6 +17,9 @@ export default class CashMovement extends TenantBase {
   @column()
   declare cashRegisterSessionId: number
 
+  @column.date()
+  declare businessDate?: DateTime | null
+
   @column()
   declare orderId?: number
 

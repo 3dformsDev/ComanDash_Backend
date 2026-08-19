@@ -27,6 +27,9 @@ export default class Order extends TenantBase {
   @column()
   declare cashRegisterSessionId: number;
 
+  @column.date()
+  declare businessDate?: DateTime | null;
+
   @column()
   declare tableId?: number; // Opcional, ya que es nullable
 
@@ -106,8 +109,14 @@ export default class Order extends TenantBase {
   @column.dateTime()
   declare paidAt?: DateTime; // Opcional, ya que es nullable
 
+  @column.date()
+  declare paidBusinessDate?: DateTime | null;
+
   @column.dateTime()
   declare cancelledAt?: DateTime; // Opcional, ya que es nullable
+
+  @column.date()
+  declare cancelledBusinessDate?: DateTime | null;
 
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime;

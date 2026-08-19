@@ -1,8 +1,8 @@
+import ActivityLog from "#models/activity_log";
 import CashMovement from "#models/cash_movement";
 import CashRegister from "#models/cash_register";
 import CashRegisterSession from "#models/cash_registers_session";
 import Order from "#models/order";
-import OrderItem from "#models/order_item";
 import {
   BUSINESS_TIME_ZONE,
   DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
@@ -10,6 +10,9 @@ import {
   getCurrentBusinessDate,
   saveBusinessDayCutoffHour,
 } from "#services/reports/business_day_service";
+import CashRegisterOperatingService, {
+  CASH_RECOVERY_DURATION_MINUTES,
+} from "#services/cash_register_operating_service";
 import { io } from "#start/socket";
 import {
   buildSalesReport,
@@ -17,6 +20,7 @@ import {
   getPaidOrdersForRange,
 } from "#services/reports/sales_reporting_service";
 import { businessDaySettingValidator } from "#validators/business_day_setting";
+import { authorizeCashRecoveryValidator } from "#validators/cash_recovery";
 import {
   closeCashRegisterSessionValidatorWithCompany,
   createCashRegisterSessionValidatorWithCompany,
@@ -70,13 +74,19 @@ export default class CashRegisterSessionsController {
       // Usamos findOrFail para detenernos si la caja no existe.
       const cashRegister = await CashRegister.query({ client: trx })
         .where("id", payload.cashRegisterId)
+        .where("company_id", companyId)
         .firstOrFail();
       const locationId = cashRegister.locationId;
+      const businessDayCutoffHour = await getBusinessDayCutoffHour(
+        companyId,
+        locationId,
+      );
       // 2. Buscamos si ya existe CUALQUIER sesión abierta en esa sucursal.
       // Usamos `whereHas` para consultar a través de la relación.
       const existingOpenSessionInLocation = await CashRegisterSession.query({
         client: trx,
       })
+        .where("company_id", companyId)
         .where("status", "open")
         .whereHas("cashRegister", (query) => {
           query.where("location_id", locationId);
@@ -95,6 +105,10 @@ export default class CashRegisterSessionsController {
         ...payload,
         companyId,
         userId: currentUser.id,
+        businessDate: DateTime.fromISO(
+          getCurrentBusinessDate(businessDayCutoffHour),
+        ),
+        businessDayCutoffHour,
       };
 
       const cashRegisterSession = await CashRegisterSession.create(
@@ -108,6 +122,7 @@ export default class CashRegisterSessionsController {
           {
             companyId,
             cashRegisterSessionId: cashRegisterSession.id,
+            businessDate: cashRegisterSession.businessDate || undefined,
             movementType: "deposit",
             userId: auth.user!.id,
             amount: payload.openingBalance,
@@ -169,6 +184,8 @@ export default class CashRegisterSessionsController {
     params,
     companyId,
     locationId,
+    auth,
+    request: httpRequest,
   }: HttpContext) {
     // 1. Validar el payload de entrada (solo realClosingBalance y notas)
     const payload = await request.validateUsing(
@@ -182,6 +199,12 @@ export default class CashRegisterSessionsController {
       })
         .where("id", params.id)
         .where("company_id", companyId)
+        .whereHas("cashRegister", (query) => {
+          query
+            .where("company_id", companyId)
+            .where("location_id", locationId!);
+        })
+        .forUpdate()
         .firstOrFail();
 
       // 2. Validaciones de negocio
@@ -192,18 +215,28 @@ export default class CashRegisterSessionsController {
         });
       }
 
-      // VALIDACIÓN 1: No deben existir órdenes EN PREPARACIÓN.
-      const pendingItemsCount = await OrderItem.query()
-        .where("kitchen_status", "in_preparation")
-        .whereHas("order", (orderQuery) => {
-          orderQuery.where("cash_register_session_id", params.id);
+      // VALIDACIÓN 1: No deben existir comandas pendientes de entregar.
+      const activeKitchenOrdersCount = await Order.query({ client: trx })
+        .where("company_id", companyId)
+        .where("location_id", locationId!)
+        .where("cash_register_session_id", params.id)
+        .whereNotIn("status", ["cancelled"])
+        .whereHas("orderItems", (itemQuery) => {
+          itemQuery.whereIn("kitchen_status", [
+            "in_preparation",
+            "pending",
+            "ready",
+          ]);
         })
         .count("* as total");
 
-      if (Number(pendingItemsCount[0].$extras.total) > 0) {
+      const activeKitchenOrdersTotal = Number(
+        activeKitchenOrdersCount[0].$extras.total,
+      );
+      if (activeKitchenOrdersTotal > 0) {
         await trx.rollback();
         return response.conflict({
-          message: `No se puede cerrar la caja. Aún existen (${pendingItemsCount[0].$extras.total}) órdenes en preparación.`,
+          message: `No se puede cerrar la caja. Aún existen (${activeKitchenOrdersTotal}) comandas pendientes de entregar.`,
         });
       }
 
@@ -255,26 +288,60 @@ export default class CashRegisterSessionsController {
         closingBalance: calculatedClosingBalance.toNumber(),
         realClosingBalance: realClosingBalance.toNumber(),
         differenceAmount: differenceAmount.toNumber(),
-        closedAt: payload.closedAt
-          ? DateTime.fromJSDate(payload.closedAt)
-          : DateTime.now(),
+        closedAt: DateTime.now(),
+        recoveryAuthorizedUntil: null,
+        recoveryAuthorizedBy: null,
+        recoveryReason: null,
       };
+
+      const recoveryWasConfigured = Boolean(
+        cashRegisterSession.recoveryAuthorizedUntil ||
+          cashRegisterSession.recoveryAuthorizedBy ||
+          cashRegisterSession.recoveryReason,
+      );
 
       await cashRegisterSession.merge(updateData).save();
 
+      if (recoveryWasConfigured) {
+        await ActivityLog.create(
+          {
+            companyId,
+            userId: auth.user!.id,
+            action: "cash_recovery_ended_by_close",
+            resourceType: "cash_register_session",
+            resourceId: cashRegisterSession.id,
+            details: {
+              businessDate: cashRegisterSession.businessDate?.toISODate(),
+            },
+            ipAddress: httpRequest.ip(),
+            userAgent: httpRequest.header("user-agent"),
+          },
+          { client: trx },
+        );
+      }
+
       await trx.commit();
 
-      // ✅ PASO CLAVE: Notificar a todos los clientes en la misma sucursal
-      const roomName = `kitchen_room_${companyId}_${locationId}`;
-      // Enviamos el objeto de la sesión recién cerrada como dato
-      io.to(roomName).emit(
-        "cash_register_closed",
-        cashRegisterSession.serialize(),
-      );
+      try {
+        // ✅ PASO CLAVE: Notificar a todos los clientes en la misma sucursal
+        const roomName = `kitchen_room_${companyId}_${locationId}`;
+        // Enviamos el objeto de la sesión recién cerrada como dato
+        io.to(roomName).emit(
+          "cash_register_closed",
+          cashRegisterSession.serialize(),
+        );
+      } catch (notificationError) {
+        console.error(
+          "La caja se cerro, pero no fue posible notificarlo por socket:",
+          notificationError,
+        );
+      }
 
       return response.ok(cashRegisterSession);
     } catch (error) {
-      await trx.rollback();
+      if (!trx.isCompleted) {
+        await trx.rollback();
+      }
       if (error.code === "E_VALIDATION_ERROR") {
         return response.unprocessableEntity({ errors: error.messages });
       }
@@ -532,6 +599,10 @@ export default class CashRegisterSessionsController {
       ]);
 
       const summary = report.summary;
+      const cashRegisterState = await new CashRegisterOperatingService().getState(
+        companyId,
+        locationId,
+      );
 
       const summaryData = {
         businessDate,
@@ -555,6 +626,7 @@ export default class CashRegisterSessionsController {
         cuts: report.cuts,
         paidOrders,
         cancelledOrders,
+        cashRegisterState,
       };
 
       return response.ok({ data: summaryData });
@@ -563,6 +635,248 @@ export default class CashRegisterSessionsController {
       return response.internalServerError({
         message: "Ocurrió un error al generar el resumen de la sesión.",
         error: error.message,
+      });
+    }
+  }
+
+  public async getOperatingState({
+    response,
+    companyId,
+    locationId,
+  }: HttpContext) {
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
+    try {
+      const state = await new CashRegisterOperatingService().getState(
+        companyId,
+        locationId,
+      );
+      return response.ok({ data: state });
+    } catch (error) {
+      console.error("Error al consultar el estado operativo de la caja:", error);
+      return response.internalServerError({
+        message: "No fue posible consultar el estado operativo de la caja.",
+      });
+    }
+  }
+
+  public async authorizeRecovery({
+    request,
+    response,
+    auth,
+    companyId,
+    locationId,
+    params,
+  }: HttpContext) {
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
+    await auth.user!.load("role");
+    if (
+      !["super_admin", "admin", "manager"].includes(
+        auth.user!.role?.code || "",
+      )
+    ) {
+      return response.forbidden({
+        message: "Solo un administrador o gerente puede autorizar la recuperacion.",
+      });
+    }
+
+    const { reason } = await request.validateUsing(
+      authorizeCashRecoveryValidator,
+    );
+    const trx = await db.transaction();
+
+    try {
+      const operatingService = new CashRegisterOperatingService();
+      const state = await operatingService.getState(companyId, locationId, {
+        trx,
+        lockForUpdate: true,
+      });
+
+      if (
+        state.status !== "open_previous" ||
+        state.sessionId !== Number(params.id)
+      ) {
+        await trx.rollback();
+        return response.conflict({
+          message:
+            "La sesion indicada no esta abierta o no pertenece a un dia operativo anterior.",
+        });
+      }
+
+      const session = await CashRegisterSession.query({ client: trx })
+        .where("id", state.sessionId)
+        .where("company_id", companyId)
+        .firstOrFail();
+      const action = state.recoveryIsActive
+        ? "cash_recovery_renewed"
+        : "cash_recovery_authorized";
+      const authorizedUntil = DateTime.now().plus({
+        minutes: CASH_RECOVERY_DURATION_MINUTES,
+      });
+
+      session.businessDate ||= DateTime.fromISO(state.sessionBusinessDate!);
+      session.businessDayCutoffHour ||= state.businessDayCutoffHour;
+      session.recoveryAuthorizedUntil = authorizedUntil;
+      session.recoveryAuthorizedBy = auth.user!.id;
+      session.recoveryReason = reason;
+      await session.save();
+
+      await ActivityLog.create(
+        {
+          companyId,
+          userId: auth.user!.id,
+          action,
+          resourceType: "cash_register_session",
+          resourceId: session.id,
+          details: {
+            reason,
+            businessDate: state.sessionBusinessDate,
+            authorizedUntil: authorizedUntil.toISO(),
+            durationMinutes: CASH_RECOVERY_DURATION_MINUTES,
+          },
+          ipAddress: request.ip(),
+          userAgent: request.header("user-agent"),
+        },
+        { client: trx },
+      );
+
+      const updatedState = await operatingService.getState(
+        companyId,
+        locationId,
+        { trx },
+      );
+
+      await trx.commit();
+
+      try {
+        io.to(`kitchen_room_${companyId}_${locationId}`).emit(
+          "cash_register_recovery_changed",
+          updatedState,
+        );
+      } catch (notificationError) {
+        console.error(
+          "La recuperacion se autorizo, pero no fue posible notificarlo por socket:",
+          notificationError,
+        );
+      }
+
+      return response.ok({
+        data: updatedState,
+        message: "Modo recuperacion habilitado durante 60 minutos.",
+      });
+    } catch (error) {
+      if (!trx.isCompleted) {
+        await trx.rollback();
+      }
+      console.error("Error al autorizar la recuperacion de caja:", error);
+      return response.internalServerError({
+        message: "No fue posible autorizar la recuperacion de caja.",
+      });
+    }
+  }
+
+  public async endRecovery({
+    request,
+    response,
+    auth,
+    companyId,
+    locationId,
+    params,
+  }: HttpContext) {
+    if (!companyId || !locationId) {
+      return response.badRequest({
+        message: "La compania y la sucursal son requeridas.",
+      });
+    }
+
+    await auth.user!.load("role");
+    if (
+      !["super_admin", "admin", "manager"].includes(
+        auth.user!.role?.code || "",
+      )
+    ) {
+      return response.forbidden({
+        message: "Solo un administrador o gerente puede finalizar la recuperacion.",
+      });
+    }
+
+    const trx = await db.transaction();
+    try {
+      const session = await CashRegisterSession.query({ client: trx })
+        .where("id", params.id)
+        .where("company_id", companyId)
+        .where("status", "open")
+        .whereHas("cashRegister", (query) => {
+          query
+            .where("company_id", companyId)
+            .where("location_id", locationId);
+        })
+        .forUpdate()
+        .firstOrFail();
+
+      session.recoveryAuthorizedUntil = null;
+      session.recoveryAuthorizedBy = null;
+      session.recoveryReason = null;
+      await session.save();
+
+      await ActivityLog.create(
+        {
+          companyId,
+          userId: auth.user!.id,
+          action: "cash_recovery_ended",
+          resourceType: "cash_register_session",
+          resourceId: session.id,
+          details: {
+            businessDate: session.businessDate?.toISODate(),
+          },
+          ipAddress: request.ip(),
+          userAgent: request.header("user-agent"),
+        },
+        { client: trx },
+      );
+
+      const updatedState = await new CashRegisterOperatingService().getState(
+        companyId,
+        locationId,
+        { trx },
+      );
+
+      await trx.commit();
+
+      try {
+        io.to(`kitchen_room_${companyId}_${locationId}`).emit(
+          "cash_register_recovery_changed",
+          updatedState,
+        );
+      } catch (notificationError) {
+        console.error(
+          "La recuperacion finalizo, pero no fue posible notificarlo por socket:",
+          notificationError,
+        );
+      }
+
+      return response.ok({ data: updatedState });
+    } catch (error) {
+      if (!trx.isCompleted) {
+        await trx.rollback();
+      }
+      if (error.code === "E_ROW_NOT_FOUND") {
+        return response.notFound({
+          message: "La sesion de caja abierta no fue encontrada.",
+        });
+      }
+      console.error("Error al finalizar la recuperacion de caja:", error);
+      return response.internalServerError({
+        message: "No fue posible finalizar la recuperacion de caja.",
       });
     }
   }

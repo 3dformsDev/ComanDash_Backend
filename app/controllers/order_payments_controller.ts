@@ -10,6 +10,7 @@ import OrderStatusHistory from "#models/order_status_history";
 import OrdersController from "./orders_controller.js";
 import { io } from "#start/socket";
 import OrderAdjustmentService from "#services/orders/order_adjustment_service";
+import CashRegisterOperatingService from "#services/cash_register_operating_service";
 
 export default class OrderPaymentsController {
   /**
@@ -65,10 +66,15 @@ export default class OrderPaymentsController {
     response,
     companyId,
     cashRegisterSessionId,
+    cashRegisterBusinessDate,
+    cashRegisterIsPreviousBusinessDay,
+    cashRecoveryIsActive,
+    cashRecoveryAuthorizedUntil,
     locationId,
     auth,
+    cashTransactionTrx,
   }: HttpContext) {
-    const trx = await db.transaction();
+    const trx = cashTransactionTrx || await db.transaction();
     try {
       // NOTA: Tu validador debe ser ajustado para requerir 'movementType' y 'amount' para withdrawals
       const payload = await request.validateUsing(
@@ -105,6 +111,18 @@ export default class OrderPaymentsController {
         await trx.rollback();
         return response.notFound({
           message: "La orden no fue encontrada o no pertenece a la compañía.",
+        });
+      }
+
+      if (
+        cashRegisterIsPreviousBusinessDay &&
+        order.cashRegisterSessionId !== cashRegisterSessionId
+      ) {
+        await trx.rollback();
+        return response.conflict({
+          message:
+            "En modo recuperacion solo se pueden operar comandas de la caja anterior activa.",
+          code: "CASH_RECOVERY_ORDER_SESSION_MISMATCH",
         });
       }
 
@@ -160,6 +178,9 @@ export default class OrderPaymentsController {
             notes: notes || `Reembolso para orden #${order.orderNumber}`,
             amount: refundAmount.negated().toNumber(), // <- Monto NEGATIVO
             cashRegisterSessionId,
+            businessDate: cashRegisterBusinessDate
+              ? DateTime.fromISO(cashRegisterBusinessDate)
+              : undefined,
             processedBy: auth.user!.id,
             processedAt: DateTime.now(),
           },
@@ -170,6 +191,9 @@ export default class OrderPaymentsController {
           {
             companyId,
             cashRegisterSessionId,
+            businessDate: cashRegisterBusinessDate
+              ? DateTime.fromISO(cashRegisterBusinessDate)
+              : undefined,
             orderId,
             userId: auth.user!.id,
             movementType: "withdrawal", // <- Tipo de movimiento
@@ -202,6 +226,24 @@ export default class OrderPaymentsController {
           // public async updateTableStatus(tableId: number, trx: any) { ... }
           await ordersController.updateTableStatus(order.tableId, trx);
         }
+
+        await new CashRegisterOperatingService().logRecoveryActivity(
+          {
+            companyId,
+            userId: auth.user!.id,
+            cashRegisterSessionId,
+            cashRegisterBusinessDate,
+            cashRecoveryIsActive,
+            cashRecoveryAuthorizedUntil,
+            ipAddress: request.ip(),
+            userAgent: request.header("user-agent"),
+          },
+          "cash_recovery_order_refunded",
+          "order_payment",
+          orderPayment.id,
+          { orderId: order.id, amount: refundAmount.toNumber() },
+          trx,
+        );
 
         await trx.commit();
         return response.created({
@@ -247,6 +289,9 @@ export default class OrderPaymentsController {
             notes: notes || `Pago parcial para orden #${order.orderNumber}`,
             amount: requestedPaymentAmount.toNumber(),
             cashRegisterSessionId,
+            businessDate: cashRegisterBusinessDate
+              ? DateTime.fromISO(cashRegisterBusinessDate)
+              : undefined,
             processedBy: auth.user!.id,
             processedAt: DateTime.now(),
           },
@@ -257,6 +302,9 @@ export default class OrderPaymentsController {
           {
             companyId,
             cashRegisterSessionId,
+            businessDate: cashRegisterBusinessDate
+              ? DateTime.fromISO(cashRegisterBusinessDate)
+              : undefined,
             orderId,
             userId: auth.user!.id,
             movementType: "sale",
@@ -281,6 +329,9 @@ export default class OrderPaymentsController {
             .merge({
               status: "paid",
               paidAt: DateTime.now(),
+              paidBusinessDate: cashRegisterBusinessDate
+                ? DateTime.fromISO(cashRegisterBusinessDate)
+                : undefined,
             })
             .save();
 
@@ -301,6 +352,28 @@ export default class OrderPaymentsController {
             paymentMethodQuery.select("id", "name", "type");
           });
         });
+
+        await new CashRegisterOperatingService().logRecoveryActivity(
+          {
+            companyId,
+            userId: auth.user!.id,
+            cashRegisterSessionId,
+            cashRegisterBusinessDate,
+            cashRecoveryIsActive,
+            cashRecoveryAuthorizedUntil,
+            ipAddress: request.ip(),
+            userAgent: request.header("user-agent"),
+          },
+          "cash_recovery_order_payment_created",
+          "order_payment",
+          orderPayment.id,
+          {
+            orderId: order.id,
+            amount: requestedPaymentAmount.toNumber(),
+            isFullyPaid,
+          },
+          trx,
+        );
 
         await trx.commit();
 

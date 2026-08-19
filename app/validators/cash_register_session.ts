@@ -165,10 +165,6 @@ export const closeCashRegisterSessionValidatorWithCompany = () => {
             // Notas sobre el cierre - altamente recomendadas
             notes: vine.string().trim().maxLength(1000).optional(),
 
-            // Fecha de cierre - opcional, se puede usar la actual por defecto
-            closedAt: vine.date({
-                formats: ['YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DD', 'ISO']
-            }).optional(),
         })
     )
 }

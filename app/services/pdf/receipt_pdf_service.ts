@@ -1,6 +1,10 @@
 import PDFDocument from "pdfkit";
 import Order from "#models/order";
 import OrderAdjustment from "#models/order_adjustment";
+import {
+  DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+  getCurrentBusinessDate,
+} from "#services/reports/business_day_service";
 
 export default class ReceiptPdfService {
   public static async generate(order: Order, logoBuffer?: Buffer) {
@@ -103,6 +107,29 @@ export default class ReceiptPdfService {
           align: "center",
         },
       );
+
+      const businessDate =
+        order.paidBusinessDate ||
+        order.businessDate ||
+        order.cashRegisterSession?.businessDate;
+
+      if (businessDate) {
+        doc.text(`Día operativo: ${businessDate.toFormat("dd/MM/yyyy")}`, {
+          align: "center",
+        });
+
+        const registrationBusinessDate = getCurrentBusinessDate(
+          order.cashRegisterSession?.businessDayCutoffHour ??
+            DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
+          order.createdAt,
+        );
+
+        if (businessDate.toISODate() !== registrationBusinessDate) {
+          doc.text("Registro posterior autorizado", {
+            align: "center",
+          });
+        }
+      }
 
       if (order.tableId) {
         doc.text(`Mesa: ${order.tableId}`, {
