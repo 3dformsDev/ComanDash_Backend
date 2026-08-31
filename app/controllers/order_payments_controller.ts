@@ -93,9 +93,13 @@ export default class OrderPaymentsController {
         .where("id", orderId)
         .where("company_id", companyId)
         .preload("orderItems", (itemQuery: any) => {
-          return itemQuery.preload("product", (subQuery: any) => {
-            return subQuery.preload("category");
-          });
+          return itemQuery
+            .preload("product", (subQuery: any) => {
+              return subQuery.preload("category");
+            })
+            .preload("modifierSelections", (selectionQuery: any) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            );
         })
         .preload("table")
         .preload("waiter")

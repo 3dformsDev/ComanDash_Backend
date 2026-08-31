@@ -411,9 +411,13 @@ export async function getPaidOrdersForRange(
       ...businessDateFilter("paid_business_date", "paid_at", range),
     )
     .preload("orderItems", (query) =>
-      query.preload("product", (productQuery) =>
-        productQuery.preload("category"),
-      ),
+      query
+        .preload("product", (productQuery) =>
+          productQuery.preload("category"),
+        )
+        .preload("modifierSelections", (selectionQuery) =>
+          selectionQuery.orderBy("display_order", "asc"),
+        ),
     )
     .preload("waiter")
     .preload("table")
@@ -448,9 +452,13 @@ export async function getCancelledOrdersForRange(
       ),
     )
     .preload("orderItems", (query) =>
-      query.preload("product", (productQuery) =>
-        productQuery.preload("category"),
-      ),
+      query
+        .preload("product", (productQuery) =>
+          productQuery.preload("category"),
+        )
+        .preload("modifierSelections", (selectionQuery) =>
+          selectionQuery.orderBy("display_order", "asc"),
+        ),
     )
     .preload("waiter")
     .preload("table")

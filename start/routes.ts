@@ -17,6 +17,7 @@ import PaymentMethodsController from '#controllers/payment_methods_controller';
 import CategoriesController from '#controllers/categories_controller';
 import ProductsController from '#controllers/products_controller';
 import TablesController from '#controllers/tables_controller';
+import TableZonesController from '#controllers/table_zones_controller';
 import CashRegistersController from '#controllers/cash_registers_controller';
 import OrdersController from '#controllers/orders_controller';
 import CashRegisterSessionsController from '#controllers/cash_register_sessions_controller';
@@ -26,6 +27,9 @@ import NotificationsController from '#controllers/notifications_controller';
 import ReportsController from '#controllers/reports_controller';
 import ReceiptsController from '#controllers/receipts_controller';
 import ReceiptBrandingsController from '#controllers/receipt_brandings_controller';
+import ModifierGroupsController from '#controllers/modifier_groups_controller';
+import ModifierOptionsController from '#controllers/modifier_options_controller';
+import ProductPersonalizationsController from '#controllers/product_personalizations_controller';
 
 router.get('/', async () => {
   return {
@@ -287,6 +291,30 @@ router.group(() => {
       middleware.companyContext(),
     ])
 
+  router.resource('modifier-groups', ModifierGroupsController)
+    .middleware('*', [
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.resource('modifier-options', ModifierOptionsController)
+    .middleware('*', [
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.get('/products/:id/personalizations', [ProductPersonalizationsController, 'show'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
+  router.put('/products/:id/personalizations', [ProductPersonalizationsController, 'sync'])
+    .middleware([
+      middleware.auth(),
+      middleware.companyContext(),
+    ])
+
   router
     .get('/products/:id/image', [ProductsController, 'serveImage'])
     .use(middleware.auth())
@@ -308,6 +336,12 @@ router.group(() => {
       middleware.auth(),
       middleware.companyContext(),
       middleware.ensureCashRegisterIsOpen(),
+    ])
+
+  router.resource('table-zones', TableZonesController)
+    .middleware('*', [
+      middleware.auth(),
+      middleware.companyContext(),
     ])
 
   router.resource('tables', TablesController)

@@ -1,9 +1,10 @@
 import { DateTime } from 'luxon'
-import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
+import { BaseModel, column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
 import Order from '#models/order'
 import Product from '#models/product'
-import type { BelongsTo } from '@adonisjs/lucid/types/relations'
+import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
 import { Decimal } from 'decimal.js'
+import OrderItemModifierSelection from '#models/order_item_modifier_selection'
 
 // Tipos para el estado de la cocina para mayor seguridad
 export type KitchenStatus = 'pending' | 'in_preparation' | 'ready' | 'served'
@@ -53,6 +54,9 @@ export default class OrderItem extends BaseModel {
 
   @belongsTo(() => Product)
   declare product: BelongsTo<typeof Product>
+
+  @hasMany(() => OrderItemModifierSelection)
+  declare modifierSelections: HasMany<typeof OrderItemModifierSelection>
 
   /**
    * MÉTODOS HELPER PARA CÁLCULOS

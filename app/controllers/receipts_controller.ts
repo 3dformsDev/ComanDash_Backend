@@ -22,7 +22,11 @@ export default class ReceiptsController {
       .where("company_id", companyId)
       .where("location_id", locationId)
       .preload("orderItems", (query) => {
-        query.preload("product");
+        query
+          .preload("product")
+          .preload("modifierSelections", (selectionQuery) =>
+            selectionQuery.orderBy("display_order", "asc"),
+          );
       })
       .preload("payments", (query) => {
         query.preload("paymentMethod");

@@ -1,5 +1,6 @@
 import Order from '#models/order'
 import Table from '#models/table'
+import TableZone from '#models/table_zone'
 import { io } from '#start/socket'
 import { createTableValidatorWithCompany, updateTableValidatorWithCompany } from '#validators/table'
 import type { HttpContext } from '@adonisjs/core/http'
@@ -9,7 +10,11 @@ export default class TablesController {
   /**
      * List all tables for the authenticated user's company.
      */
-  async index({ response, companyId, getQueryData }: HttpContext) {
+  async index({ response, companyId, locationId, getQueryData }: HttpContext) {
+    if (!locationId) {
+      return response.badRequest({ message: 'No hay una sede activa para consultar las mesas.' })
+    }
+
     const queryData = getQueryData() // Ya incluye company_id automáticamente
     const page = queryData.page || 1
     const perPage = queryData.perPage || 10
@@ -17,7 +22,7 @@ export default class TablesController {
 
     // ✅ PASO 1: Definir el namespace y la clave de caché
     const namespaceKey = `tables:${companyId}`
-    const cacheKey = `page:${page}:perPage:${perPage}:filter:${isActiveFilter}`
+    const cacheKey = `location:${locationId}:page:${page}:perPage:${perPage}:filter:${isActiveFilter}`
 
     try {
       // ✅ PASO 2: Envolver la lógica en cache.getOrSet usando el namespace
@@ -27,6 +32,8 @@ export default class TablesController {
           console.log(`-- CACHE MISS: [${namespaceKey}] Buscando en BD para la clave: ${cacheKey}`)
 
           let query = Table.withCompanyFilter(companyId)
+            .where('location_id', locationId)
+            .preload('tableZone')
 
           if (isActiveFilter === 'active') {
             query = query.where('is_active', true)
@@ -50,13 +57,42 @@ export default class TablesController {
   /**
    * Create a new table for the authenticated user's company.
    */
-  async store({ request, response, companyId }: HttpContext) {
+  async store({ request, response, companyId, locationId }: HttpContext) {
+    if (!locationId) {
+      return response.badRequest({ message: 'No hay una sede activa para crear la mesa.' })
+    }
+
     try {
       // Crear el validador con el companyId del contexto
       const validator = createTableValidatorWithCompany(companyId)
       const payload = await request.validateUsing(validator)
 
-      const table = await Table.create({ ...payload, companyId })
+      if (payload.locationId !== locationId) {
+        return response.forbidden({ message: 'No puedes crear mesas en otra sede.' })
+      }
+
+      const { zoneId, ...tablePayload } = payload
+      const selectedZone = zoneId
+        ? await TableZone.withCompanyFilter(companyId)
+          .where('location_id', locationId)
+          .where('id', zoneId)
+          .where('is_active', true)
+          .first()
+        : null
+
+      if (zoneId && !selectedZone) {
+        return response.unprocessableEntity({
+          message: 'La zona seleccionada no existe o no pertenece a esta sede.',
+        })
+      }
+
+      const table = await Table.create({
+        ...tablePayload,
+        companyId,
+        zoneId: selectedZone?.id ?? null,
+        zone: selectedZone?.name ?? tablePayload.zone ?? null,
+      })
+      await table.load('tableZone')
 
       // ✅ PASO 3: Invalidar la caché de mesas para esta compañía
       const namespaceKey = `tables:${companyId}`
@@ -83,16 +119,22 @@ export default class TablesController {
   /**
    * Show a specific category (only from user's company).
    */
-  async show({ params, response, companyId }: HttpContext) {
+  async show({ params, response, companyId, locationId }: HttpContext) {
+    if (!locationId) {
+      return response.badRequest({ message: 'No hay una sede activa para consultar la mesa.' })
+    }
+
     // Para una sola entidad, el cacheo también es útil
-    const cacheKey = `table:${params.id}`
+    const cacheKey = `table:${companyId}:${locationId}:${params.id}`
     try {
       const table = await cache.getOrSet({
         key: cacheKey,
         factory: async () => {
           console.log(`-- CACHE MISS: Buscando tabla #${params.id} en la BD.`)
           const tableFromDb = await Table.withCompanyFilter(companyId)
+            .where('location_id', locationId)
             .where('id', params.id)
+            .preload('tableZone')
             .firstOrFail()
           return tableFromDb.toJSON()
         },
@@ -110,7 +152,11 @@ export default class TablesController {
   /**
   * Update an existing table for the authenticated user's company.
   */
-  async update({ request, response, params, companyId }: HttpContext) {
+  async update({ request, response, params, companyId, locationId }: HttpContext) {
+    if (!locationId) {
+      return response.badRequest({ message: 'No hay una sede activa para actualizar la mesa.' })
+    }
+
     try {
       // Crear el validador con el companyId del contexto
       const validator = updateTableValidatorWithCompany(companyId)
@@ -119,13 +165,45 @@ export default class TablesController {
       const table = await Table.query()
         .where('id', params.id)
         .where('company_id', companyId)
+        .where('location_id', locationId)
         .firstOrFail()
 
-      await table.merge(payload).save()
+      if (payload.locationId && payload.locationId !== locationId) {
+        return response.forbidden({ message: 'No puedes mover la mesa a otra sede.' })
+      }
+
+      const { zoneId, ...tablePayload } = payload
+      let selectedZone: TableZone | null = null
+
+      if (zoneId !== undefined && zoneId !== null) {
+        selectedZone = await TableZone.withCompanyFilter(companyId)
+          .where('location_id', locationId)
+          .where('id', zoneId)
+          .where('is_active', true)
+          .first()
+
+        if (!selectedZone) {
+          return response.unprocessableEntity({
+            message: 'La zona seleccionada no existe o no pertenece a esta sede.',
+          })
+        }
+      }
+
+      table.merge({
+        ...tablePayload,
+        ...(zoneId !== undefined
+          ? {
+            zoneId: selectedZone?.id ?? null,
+            zone: selectedZone?.name ?? null,
+          }
+          : {}),
+      })
+      await table.save()
+      await table.load('tableZone')
 
       // ✅ PASO 3: Invalidar el namespace y la clave individual
       const namespaceKey = `tables:${companyId}`
-      const individualCacheKey = `table:${params.id}`
+      const individualCacheKey = `table:${companyId}:${locationId}:${params.id}`
       await cache.namespace(namespaceKey).clear()
       await cache.delete({ key: individualCacheKey })
       console.log(`-- CACHE CLEARED for namespace: ${namespaceKey} and key: ${individualCacheKey}`)
@@ -150,9 +228,14 @@ export default class TablesController {
   /**
       * Delete a specific table (only from user's company).
       */
-  async destroy({ params, response, companyId }: HttpContext) {
+  async destroy({ params, response, companyId, locationId }: HttpContext) {
+    if (!locationId) {
+      return response.badRequest({ message: 'No hay una sede activa para desactivar la mesa.' })
+    }
+
     try {
       const table = await Table.withCompanyFilter(companyId)
+        .where('location_id', locationId)
         .where('id', params.id)
         .firstOrFail()
 
@@ -162,7 +245,7 @@ export default class TablesController {
 
       // ✅ PASO 3: Invalidar el namespace y la clave individual
       const namespaceKey = `tables:${companyId}`
-      const individualCacheKey = `table:${params.id}`
+      const individualCacheKey = `table:${companyId}:${locationId}:${params.id}`
       await cache.namespace(namespaceKey).clear()
       await cache.delete({ key: individualCacheKey })
       console.log(`-- CACHE CLEARED for namespace: ${namespaceKey} and key: ${individualCacheKey}`)
@@ -201,6 +284,9 @@ export default class TablesController {
                 .preload('product', (subQuery: any) => {
                   return subQuery.preload('category')
                 })
+                .preload('modifierSelections', (selectionQuery: any) =>
+                  selectionQuery.orderBy('display_order', 'asc'),
+                )
             })
             .preload('waiter')
             .preload('table');
@@ -230,9 +316,13 @@ export default class TablesController {
         .where('location_id', locationId!)
         .where('table_id', params.id)
         .preload('orderItems', (itemQuery: any) => {
-          return itemQuery.preload('product', (productQuery: any) => {
-            return productQuery.preload('category')
-          })
+          return itemQuery
+            .preload('product', (productQuery: any) => {
+              return productQuery.preload('category')
+            })
+            .preload('modifierSelections', (selectionQuery: any) =>
+              selectionQuery.orderBy('display_order', 'asc'),
+            )
         })
         .preload('waiter')
         .preload('table')
@@ -251,7 +341,7 @@ export default class TablesController {
 
       // ✅ PASO 3: Invalidar la caché después de modificar la mesa
       const namespaceKey = `tables:${companyId}`
-      const individualCacheKey = `table:${params.id}`
+      const individualCacheKey = `table:${companyId}:${locationId}:${params.id}`
       await cache.namespace(namespaceKey).clear()
       await cache.delete({ key: individualCacheKey })
       console.log(`-- CACHE CLEARED after releasing table for namespace: ${namespaceKey}`)

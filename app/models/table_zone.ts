@@ -1,13 +1,14 @@
 import { DateTime } from 'luxon'
-import { column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
+import { belongsTo, column, hasMany } from '@adonisjs/lucid/orm'
 import Company from '#models/company'
 import Location from '#models/location'
-import Order from '#models/order'
-import TableZone from '#models/table_zone'
+import Table from '#models/table'
 import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
 import TenantBase from './tenant_base.js'
 
-export default class Table extends TenantBase {
+export type TableZoneIconType = 'table' | 'bar' | 'terrace' | 'special'
+
+export default class TableZone extends TenantBase {
   @column({ isPrimary: true })
   declare id: number
 
@@ -17,25 +18,19 @@ export default class Table extends TenantBase {
   @column()
   declare locationId: number
 
-  @column({ columnName: 'number' }) // Mapeo explícito para evitar palabra reservada
-  declare tableNumber: string
+  @column()
+  declare name: string
 
   @column()
-  declare capacity: number
+  declare iconType: TableZoneIconType
 
   @column()
-  declare zone: string | null
-
-  @column()
-  declare zoneId: number | null
+  declare displayOrder: number
 
   @column({
-    consume: (value: any) => Boolean(value), // cuando se lee de la BD → 0/1 a true/false
-    prepare: (value: boolean) => value ? 1 : 0, // cuando se guarda → true/false a 0/1
+    consume: (value: unknown) => Boolean(value),
+    prepare: (value: boolean) => value ? 1 : 0,
   })
-  declare isBussy: boolean
-
-  @column()
   declare isActive: boolean
 
   @column.dateTime({ autoCreate: true })
@@ -44,20 +39,14 @@ export default class Table extends TenantBase {
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updatedAt: DateTime
 
-  /**
-   * RELACIONES
-   */
   @belongsTo(() => Company)
   declare company: BelongsTo<typeof Company>
 
   @belongsTo(() => Location)
   declare location: BelongsTo<typeof Location>
 
-  @belongsTo(() => TableZone, {
+  @hasMany(() => Table, {
     foreignKey: 'zoneId',
   })
-  declare tableZone: BelongsTo<typeof TableZone>
-
-  @hasMany(() => Order)
-  declare orders: HasMany<typeof Order>
+  declare tables: HasMany<typeof Table>
 }

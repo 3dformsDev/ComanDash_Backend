@@ -26,6 +26,7 @@ export const createTableValidatorWithCompany = (companyId: number) => {
       tableNumber: vine.string().trim().minLength(1).maxLength(50),
       capacity: vine.number().positive().min(1).max(100).optional(),
       zone: vine.string().trim().maxLength(100).optional().nullable(),
+      zoneId: vine.number().positive().optional().nullable(),
       isActive: vine.boolean().optional(),
     })
   )
@@ -39,6 +40,7 @@ export const updateTableValidatorWithCompany = (companyId: number) => {
       tableNumber: vine.string().trim().minLength(1).maxLength(50).optional(),
       capacity: vine.number().positive().min(1).max(100).optional(),
       zone: vine.string().trim().maxLength(100).optional().nullable(),
+      zoneId: vine.number().positive().optional().nullable(),
       isActive: vine.boolean().optional(),
     })
   )

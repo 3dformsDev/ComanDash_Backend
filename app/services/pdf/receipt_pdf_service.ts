@@ -161,8 +161,12 @@ export default class ReceiptPdfService {
         const productName = `${item.quantity}x ${item.product?.name || "Producto"}`;
 
         const currentY = doc.y;
+        doc.fontSize(10).font("Helvetica");
+        const productNameHeight = doc.heightOfString(productName, {
+          width: 115,
+        });
 
-        doc.fontSize(10).font("Helvetica").text(productName, 15, currentY, {
+        doc.text(productName, 15, currentY, {
           width: 115,
           align: "left",
         });
@@ -174,7 +178,28 @@ export default class ReceiptPdfService {
             align: "right",
           });
 
-        doc.moveDown(0.7);
+        doc.y = currentY + Math.max(productNameHeight, 12) + 4;
+
+        for (const selection of item.modifierSelections || []) {
+          const quantityPrefix = selection.quantity > 1 ? `${selection.quantity}x ` : "";
+          const optionText = `• ${quantityPrefix}${selection.optionNameSnapshot}`;
+          const optionY = doc.y;
+          doc.fontSize(8).font("Helvetica");
+          const optionHeight = doc.heightOfString(optionText, {
+            width: 110,
+          });
+
+          doc
+            .fillColor("#555555")
+            .text(optionText, 22, optionY, {
+              width: 110,
+              align: "left",
+            });
+          doc.fillColor("#000000");
+          doc.y = optionY + Math.max(optionHeight, 9) + 2;
+        }
+
+        doc.moveDown(0.35);
       }
 
       doc.moveDown(0.5);

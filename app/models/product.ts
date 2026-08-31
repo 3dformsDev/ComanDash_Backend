@@ -3,6 +3,7 @@ import { column, belongsTo, hasMany, computed } from '@adonisjs/lucid/orm'
 import Company from '#models/company'
 import Category from '#models/category'
 import OrderItem from '#models/order_item'
+import ProductModifierGroup from '#models/product_modifier_group'
 import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
 import TenantBase from './tenant_base.js'
 import { Decimal } from 'decimal.js'
@@ -63,6 +64,9 @@ export default class Product extends TenantBase {
   @hasMany(() => OrderItem)
   declare orderItems: HasMany<typeof OrderItem>
 
+  @hasMany(() => ProductModifierGroup)
+  declare modifierGroupAssignments: HasMany<typeof ProductModifierGroup>
+
   /**
    * MÉTODOS HELPER PARA CÁLCULOS
    */
@@ -88,6 +92,11 @@ export default class Product extends TenantBase {
   public get protectedImageUrl() {
     if (!this.imageUrl) return null
     return `${env.get('APP_URL')}/api/v1/products/${this.id}/image`
+  }
+
+  @computed()
+  public get hasPersonalizations() {
+    return Array.isArray(this.modifierGroupAssignments) && this.modifierGroupAssignments.length > 0
   }
 
   // @beforeFetch()

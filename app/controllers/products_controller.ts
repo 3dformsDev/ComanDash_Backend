@@ -40,6 +40,9 @@ export default class ProductsController {
 
           const paginatedResult = await query
             .preload('category', (query) => query.select('id', 'name', 'is_active'))
+            .preload('modifierGroupAssignments', (assignmentQuery) =>
+              assignmentQuery.select('id', 'product_id'),
+            )
             .orderBy('name', 'asc')
             .paginate(page, perPage)
 

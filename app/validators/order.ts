@@ -1,5 +1,15 @@
 import vine from "@vinejs/vine";
 
+const modifierSelectionsSchema = vine
+  .array(
+    vine.object({
+      modifierGroupId: vine.number().positive(),
+      modifierOptionId: vine.number().positive(),
+      quantity: vine.number().min(1),
+    }),
+  )
+  .optional();
+
 /**
  * Validador para la creación de una orden.
  * Los campos son mayormente requeridos.
@@ -88,9 +98,14 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
         .array(
           vine.object({
             productId: vine.number().exists(async (db, value) => {
-              return await db.from("products").where("id", value).first();
+              return await db
+                .from("products")
+                .where("id", value)
+                .where("company_id", companyId)
+                .first();
             }),
             quantity: vine.number().min(1),
+            modifierSelections: modifierSelectionsSchema,
             // price: ... (se obtendría del producto en el backend)/*  */
           }),
         )
@@ -136,10 +151,16 @@ export const updateOrderValidator = (companyId: number, locationId: number) =>
       // Ejemplo de cómo se vería:
       orderItems: vine.array(
         vine.object({
+          orderItemId: vine.number().positive().optional(),
           productId: vine.number().exists(async (db, value) => {
-            return await db.from("products").where("id", value).first();
+            return await db
+              .from("products")
+              .where("id", value)
+              .where("company_id", companyId)
+              .first();
           }),
           quantity: vine.number().min(1),
+          modifierSelections: modifierSelectionsSchema,
           // price: ... (se obtendría del producto en el backend)/*  */
         }),
       ),

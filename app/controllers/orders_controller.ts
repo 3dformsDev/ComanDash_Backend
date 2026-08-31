@@ -22,6 +22,10 @@ import cache from "@adonisjs/cache/services/main";
 import OrderAdjustmentService from "#services/orders/order_adjustment_service";
 import OrderAdjustment from "#models/order_adjustment";
 import CashRegisterOperatingService from "#services/cash_register_operating_service";
+import OrderItemPersonalizationService, {
+  OrderItemPersonalizationError,
+  type OrderItemInput,
+} from "#services/orders/order_item_personalization_service";
 
 function businessDateValue(value?: string): DateTime | undefined {
   return value ? DateTime.fromISO(value) : undefined;
@@ -218,6 +222,7 @@ export default class OrdersController {
       const { success, totalAmount, subtotal } = await this.addOrderItems(
         orderItems,
         order.id,
+        companyId,
         trx,
       );
 
@@ -368,7 +373,11 @@ export default class OrdersController {
         const completedOrderToEmit = await Order.query()
           .where("id", order.id)
           .preload("orderItems", (itemQuery) => {
-            itemQuery.preload("product", (p) => p.preload("category")); // Importante para que la cocina sepa el nombre del producto
+            itemQuery
+              .preload("product", (p) => p.preload("category"))
+              .preload("modifierSelections", (selectionQuery) =>
+                selectionQuery.orderBy("display_order", "asc"),
+              ); // Importante para que la cocina sepa el nombre del producto
           })
           .preload("waiter")
           .preload("table") // Para que sepan el número de mesa
@@ -412,7 +421,11 @@ export default class OrdersController {
 
       const completedOrder = await Order.query()
         .where("id", order.id)
-        .preload("orderItems")
+        .preload("orderItems", (itemQuery) =>
+          itemQuery.preload("modifierSelections", (selectionQuery) =>
+            selectionQuery.orderBy("display_order", "asc"),
+          ),
+        )
         .preload("waiter")
         .preload("payments", (paymentQuery) => {
           paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
@@ -425,6 +438,13 @@ export default class OrdersController {
       return response.created(completedOrder);
     } catch (error) {
       await trx.rollback();
+
+      if (error.code === "ORDER_ITEM_PERSONALIZATION_INVALID") {
+        return response.status(422).json({
+          message: error.message,
+          code: error.code,
+        });
+      }
 
       if (
         error.status === 422 ||
@@ -465,7 +485,13 @@ export default class OrdersController {
         .where("company_id", companyId)
         .preload("waiter")
         .preload("table")
-        .preload("orderItems")
+        .preload("orderItems", (itemQuery) => {
+          itemQuery
+            .preload("product", (productQuery) => productQuery.preload("category"))
+            .preload("modifierSelections", (selectionQuery) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            );
+        })
         .firstOrFail();
 
       return response.ok(order);
@@ -501,6 +527,7 @@ export default class OrdersController {
     const productIds = [...new Set(orderItems.map((item) => item.productId))];
     const products = await Product.query()
       .whereIn("id", productIds)
+      .where("company_id", companyId)
       .where("is_active", true)
       .exec();
 
@@ -526,7 +553,11 @@ export default class OrdersController {
           .where("location_id", locationId!)
           .forUpdate()
           .preload("orderItems", (query) => {
-            query.preload("product", (p) => p.preload("category"));
+            query
+              .preload("product", (p) => p.preload("category"))
+              .preload("modifierSelections", (selectionQuery) =>
+                selectionQuery.orderBy("display_order", "asc"),
+              );
           })
           .preload("waiter")
           .firstOrFail();
@@ -799,6 +830,7 @@ export default class OrdersController {
           order.id,
           orderItems,
           productsMap,
+          companyId,
           trx,
         );
 
@@ -851,9 +883,13 @@ export default class OrdersController {
         // --- Preparar la respuesta ---
         const updatedOrder = await Order.query()
           .where("id", order.id)
-          .preload("orderItems", (query) =>
-            query.preload("product", (p) => p.preload("category")),
-          )
+          .preload("orderItems", (query) => {
+            query
+              .preload("product", (p) => p.preload("category"))
+              .preload("modifierSelections", (selectionQuery) =>
+                selectionQuery.orderBy("display_order", "asc"),
+              );
+          })
           .preload("waiter")
           .preload("payments", (paymentQuery) => {
             paymentQuery.preload("paymentMethod", (paymentMethodQuery) => {
@@ -933,6 +969,12 @@ export default class OrdersController {
           `[ORDER_UPDATE] Error en orden ${params.id}:`,
           error.message,
         );
+        if (error.code === "ORDER_ITEM_PERSONALIZATION_INVALID") {
+          return response.status(422).json({
+            message: error.message,
+            code: error.code,
+          });
+        }
         if (
           error.status === 422 ||
           error.code === "E_VALIDATION_ERROR" ||
@@ -986,9 +1028,13 @@ export default class OrdersController {
         .where("location_id", locationId!)
         .preload("payments") // Cargar los pagos existentes
         .preload("orderItems", (query) =>
-          query.preload("product", (productQuery) =>
-            productQuery.preload("category"),
-          ),
+          query
+            .preload("product", (productQuery) =>
+              productQuery.preload("category"),
+            )
+            .preload("modifierSelections", (selectionQuery) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            ),
         )
         .preload("waiter")
         .firstOrFail();
@@ -1191,109 +1237,147 @@ export default class OrdersController {
    */
   async updateOrderItemsOptimized(
     orderId: number,
-    newOrderItems: Array<{ productId: number; quantity: number }>,
+    newOrderItems: OrderItemInput[],
     productsMap: Map<number, Product>,
+    companyId: number,
     trx: any,
   ): Promise<void> {
-    // 1. Obtener el estado actual de los items de la base de datos
-    const currentItems = await OrderItem.query({ client: trx }).where(
-      "order_id",
-      orderId,
-    );
+    const currentItems = await OrderItem.query({ client: trx })
+      .where("order_id", orderId)
+      .preload("modifierSelections", (query) => query.orderBy("display_order", "asc"));
+    const currentItemsMap = new Map(currentItems.map((item) => [item.id, item]));
+    const requestIds = newOrderItems
+      .map((item) => item.orderItemId)
+      .filter((id): id is number => typeof id === "number");
 
-    // 2. Mapear los items que NO se deben tocar (listos o servidos)
-    const preservedItemsMap = new Map<number, any>();
-    currentItems.forEach((item) => {
-      if (item.kitchenStatus === "ready" || item.kitchenStatus === "served") {
-        const current = preservedItemsMap.get(item.productId);
+    if (new Set(requestIds).size !== requestIds.length) {
+      throw new OrderItemPersonalizationError(
+        "Una linea de la comanda fue enviada mas de una vez.",
+      );
+    }
 
-        if (current) {
-          preservedItemsMap.set(item.productId, {
-            ...current,
-            quantity: current.quantity + Number(item.quantity || 0),
-            totalPrice:
-              Number(current.totalPrice || 0) + Number(item.totalPrice || 0),
-            kitchenStatus:
-              current.kitchenStatus === "served" ||
-              item.kitchenStatus === "served"
-                ? "served"
-                : "ready",
-          });
-          return;
-        }
-
-        preservedItemsMap.set(item.productId, {
-          productId: item.productId,
-          quantity: Number(item.quantity || 0),
-          unitPrice: item.unitPrice,
-          totalPrice: item.totalPrice,
-          kitchenStatus: item.kitchenStatus,
-          kitchenStartedAt: item.kitchenStartedAt,
-          kitchenReadyAt: item.kitchenReadyAt,
-          specialInstructions: item.specialInstructions,
-        });
-      }
-    });
-
-    const itemsToInsert = [];
-
-    // 3. Procesar la lista de items que llega en la petición
-    for (const itemData of newOrderItems) {
-      const product = productsMap.get(itemData.productId)!;
-      const unitPrice = product.getPriceAsDecimal();
-      const preservedItem = preservedItemsMap.get(itemData.productId);
-
-      // CASO A: El producto ya existía y estaba servido/listo
-      if (preservedItem) {
-        // A.1. Mantener la línea del producto que ya estaba servido/listo
-        itemsToInsert.push({
-          order_id: orderId,
-          product_id: preservedItem.productId,
-          quantity: preservedItem.quantity,
-          unit_price: preservedItem.unitPrice,
-          total_price: preservedItem.totalPrice,
-          kitchen_status: preservedItem.kitchenStatus, // <- Se mantiene el estado!
-          kitchen_started_at: preservedItem.kitchenStartedAt,
-          special_instructions: preservedItem.specialInstructions,
-        });
-
-        // A.2. Si la nueva cantidad es mayor, crear una línea NUEVA para la diferencia
-        const additionalQuantity = itemData.quantity - preservedItem.quantity;
-        if (additionalQuantity > 0) {
-          itemsToInsert.push({
-            order_id: orderId,
-            product_id: itemData.productId,
-            quantity: additionalQuantity,
-            unit_price: product.price,
-            total_price: unitPrice.times(additionalQuantity).toNumber(),
-            kitchen_status: "in_preparation", // <- El nuevo va a preparación
-            kitchen_started_at: DateTime.now().toFormat("yyyy-MM-dd HH:mm:ss"),
-            special_instructions: null, // Asumimos que no hay instrucciones para la adición
-          });
-        }
-      }
-      // CASO B: Es un producto nuevo o uno que aún estaba en preparación
-      else {
-        itemsToInsert.push({
-          order_id: orderId,
-          product_id: itemData.productId,
-          quantity: itemData.quantity,
-          unit_price: product.price,
-          total_price: unitPrice.times(itemData.quantity).toNumber(),
-          kitchen_status: "in_preparation", // <- Estado por defecto
-          kitchen_started_at: DateTime.now().toFormat("yyyy-MM-dd HH:mm:ss"),
-          special_instructions: null,
-        });
+    for (const item of currentItems) {
+      if (
+        ["ready", "served"].includes(item.kitchenStatus) &&
+        !requestIds.includes(item.id)
+      ) {
+        throw new OrderItemPersonalizationError(
+          "No se puede quitar una linea que ya esta lista o servida.",
+        );
       }
     }
 
-    // 4. Borrar TODOS los items viejos para reemplazarlos con la nueva lista procesada
+    const personalizationService = new OrderItemPersonalizationService();
+    const itemsToInsert: Array<{
+      data: Parameters<typeof OrderItem.create>[0];
+      persistedSelections?: OrderItem["modifierSelections"];
+      validatedSelections?: Awaited<ReturnType<OrderItemPersonalizationService["validate"]>>;
+    }> = [];
+
+    for (const itemData of newOrderItems) {
+      const product = productsMap.get(itemData.productId)!;
+      const unitPrice = product.getPriceAsDecimal();
+      const currentItem = itemData.orderItemId
+        ? currentItemsMap.get(itemData.orderItemId)
+        : undefined;
+
+      if (itemData.orderItemId && !currentItem) {
+        throw new OrderItemPersonalizationError(
+          "Una linea enviada no pertenece a esta comanda.",
+        );
+      }
+      if (currentItem && currentItem.productId !== itemData.productId) {
+        throw new OrderItemPersonalizationError(
+          "No se puede cambiar el producto de una linea existente.",
+        );
+      }
+
+      const isProtected = Boolean(
+        currentItem && ["ready", "served"].includes(currentItem.kitchenStatus),
+      );
+
+      if (isProtected && currentItem) {
+        if (itemData.quantity < currentItem.quantity) {
+          throw new OrderItemPersonalizationError(
+            "No se puede reducir una linea que ya esta lista o servida.",
+          );
+        }
+
+        itemsToInsert.push({
+          data: {
+            orderId,
+            productId: currentItem.productId,
+            quantity: currentItem.quantity,
+            unitPrice: currentItem.unitPrice,
+            totalPrice: currentItem.totalPrice,
+            kitchenStatus: currentItem.kitchenStatus,
+            kitchenStartedAt: currentItem.kitchenStartedAt,
+            kitchenReadyAt: currentItem.kitchenReadyAt,
+            servedAt: currentItem.servedAt,
+            specialInstructions: currentItem.specialInstructions,
+          },
+          persistedSelections: currentItem.modifierSelections,
+        });
+
+        const additionalQuantity = itemData.quantity - currentItem.quantity;
+        if (additionalQuantity > 0) {
+          itemsToInsert.push({
+            data: {
+              orderId,
+              productId: itemData.productId,
+              quantity: additionalQuantity,
+              unitPrice: product.price,
+              totalPrice: unitPrice.times(additionalQuantity).toNumber(),
+              kitchenStatus: "in_preparation",
+              kitchenStartedAt: DateTime.now(),
+              specialInstructions: null,
+            },
+            persistedSelections: currentItem.modifierSelections,
+          });
+        }
+        continue;
+      }
+
+      const validatedSelections = await personalizationService.validate(
+        companyId,
+        itemData,
+        trx,
+        Boolean(currentItem && currentItem.modifierSelections.length === 0),
+      );
+      itemsToInsert.push({
+        data: {
+          orderId,
+          productId: itemData.productId,
+          quantity: itemData.quantity,
+          unitPrice: product.price,
+          totalPrice: unitPrice.times(itemData.quantity).toNumber(),
+          kitchenStatus: "in_preparation",
+          kitchenStartedAt: DateTime.now(),
+          specialInstructions: currentItem?.specialInstructions || null,
+        },
+        validatedSelections,
+      });
+    }
+
     await OrderItem.query({ client: trx }).where("order_id", orderId).delete();
 
-    // 5. Insertar la nueva lista de items, que ahora respeta los estados anteriores
-    if (itemsToInsert.length > 0) {
-      // Usamos el query builder de Lucid para asegurar el formato correcto de fechas
-      await OrderItem.createMany(itemsToInsert, { client: trx });
+    for (const itemToInsert of itemsToInsert) {
+      const createdItem = await OrderItem.create(itemToInsert.data, { client: trx });
+      if (itemToInsert.persistedSelections) {
+        await personalizationService.clonePersistedSelections(
+          createdItem.id,
+          companyId,
+          itemToInsert.persistedSelections,
+          trx,
+        );
+      } else if (itemToInsert.validatedSelections) {
+        await personalizationService.persist(
+          createdItem.id,
+          companyId,
+          itemToInsert.validatedSelections,
+          trx,
+        );
+      }
     }
   }
 
@@ -1457,8 +1541,9 @@ export default class OrdersController {
    * MÉTODO HELPER ACTUALIZADO
    */
   async addOrderItems(
-    listOrderItems: Array<{ productId: number; quantity: number }>,
+    listOrderItems: OrderItemInput[],
     orderId: number,
+    companyId: number,
     trx?: any,
   ): Promise<{ success: boolean; totalAmount: number; subtotal: number }> {
     // MODIFICADO: Inicializar subtotal como un objeto Decimal.
@@ -1466,7 +1551,10 @@ export default class OrdersController {
 
     try {
       for (const itemToAdd of listOrderItems) {
-        const productData = await Product.find(itemToAdd.productId);
+        const productData = await Product.query(trx ? { client: trx } : {})
+          .where("id", itemToAdd.productId)
+          .where("company_id", companyId)
+          .first();
 
         if (!productData) {
           throw new Error(
@@ -1488,7 +1576,14 @@ export default class OrdersController {
         // MODIFICADO: Acumular el subtotal usando .plus() para mantener la precisión.
         subtotal = subtotal.plus(itemTotalPriceDecimal);
 
-        await OrderItem.create(
+        const personalizationService = new OrderItemPersonalizationService();
+        const modifierSelections = await personalizationService.validate(
+          companyId,
+          itemToAdd,
+          trx,
+        );
+
+        const orderItem = await OrderItem.create(
           {
             orderId,
             productId: itemToAdd.productId,
@@ -1503,6 +1598,13 @@ export default class OrdersController {
             specialInstructions: null,
           },
           trx ? { client: trx } : {},
+        );
+
+        await personalizationService.persist(
+          orderItem.id,
+          companyId,
+          modifierSelections,
+          trx,
         );
       }
 
@@ -1721,6 +1823,9 @@ export default class OrdersController {
                 .select("id", "name", "preparationTime", "categoryId")
                 .preload("category");
             })
+            .preload("modifierSelections", (selectionQuery: any) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            )
             .select(
               "id",
               "orderId",
@@ -1794,9 +1899,13 @@ export default class OrdersController {
           return query.whereIn("kitchenStatus", activeStatuses);
         })
         .preload("orderItems", (query) => {
-          query.preload("product", (queryProduct: any) => {
-            return queryProduct.preload("category");
-          }); // Precargamos los productos para saber sus nombres
+          query
+            .preload("product", (queryProduct: any) => {
+              return queryProduct.preload("category");
+            })
+            .preload("modifierSelections", (selectionQuery) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            ); // Precargamos los productos para saber sus nombres
         })
         .preload("waiter")
         .preload("table")
@@ -1908,7 +2017,11 @@ export default class OrdersController {
       const updatedOrderToEmit = await Order.query()
         .where("id", order.id)
         .preload("orderItems", (q) =>
-          q.preload("product", (p) => p.preload("category")),
+          q
+            .preload("product", (p) => p.preload("category"))
+            .preload("modifierSelections", (selectionQuery) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            ),
         )
         .preload("waiter")
         .preload("table")
@@ -1963,7 +2076,11 @@ export default class OrdersController {
         .where("id", params.id)
         .preload("waiter")
         .preload("orderItems", (q) =>
-          q.preload("product", (p) => p.preload("category")),
+          q
+            .preload("product", (p) => p.preload("category"))
+            .preload("modifierSelections", (selectionQuery) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            ),
         )
         .first();
 
@@ -2013,7 +2130,11 @@ export default class OrdersController {
       const updatedOrderToEmit = await Order.query()
         .where("id", order.id)
         .preload("orderItems", (q) =>
-          q.preload("product", (p) => p.preload("category")),
+          q
+            .preload("product", (p) => p.preload("category"))
+            .preload("modifierSelections", (selectionQuery) =>
+              selectionQuery.orderBy("display_order", "asc"),
+            ),
         )
         .preload("waiter")
         .preload("table")

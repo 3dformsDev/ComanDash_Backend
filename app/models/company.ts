@@ -10,6 +10,8 @@ import Category from "./category.js";
 import CompanySetting from "./company_setting.js";
 import DailySummary from "./daily_summary.js";
 import Notification from "./notification.js";
+import ModifierGroup from "./modifier_group.js";
+import ModifierOption from "./modifier_option.js";
 
 export default class Company extends BaseModel {
   @column({ isPrimary: true })
@@ -98,4 +100,10 @@ export default class Company extends BaseModel {
 
   @hasMany(() => Notification)
   declare notifications: HasMany<typeof Notification>;
+
+  @hasMany(() => ModifierGroup)
+  declare modifierGroups: HasMany<typeof ModifierGroup>;
+
+  @hasMany(() => ModifierOption)
+  declare modifierOptions: HasMany<typeof ModifierOption>;
 }
