@@ -4,6 +4,7 @@ import db from '@adonisjs/lucid/services/db'
 import ModifierGroup from '#models/modifier_group'
 import Product from '#models/product'
 import ProductModifierGroup from '#models/product_modifier_group'
+import ProductModifierOption from '#models/product_modifier_option'
 import { syncProductPersonalizationsValidator } from '#validators/modifier_personalization'
 
 export default class ProductPersonalizationsController {
@@ -35,6 +36,21 @@ export default class ProductPersonalizationsController {
         .firstOrFail()
 
       const payload = await request.validateUsing(syncProductPersonalizationsValidator)
+      const currentAssignments = await ProductModifierGroup.query({ client: trx })
+        .where('company_id', companyId)
+        .where('product_id', productId)
+        .preload('optionSettings', (optionPriceQuery) => {
+          optionPriceQuery.where('company_id', companyId)
+        })
+      const currentPrices = new Map<string, number>()
+      currentAssignments.forEach((assignment) => {
+        assignment.optionSettings.forEach((setting) => {
+          currentPrices.set(
+            `${assignment.modifierGroupId}:${setting.modifierOptionId}`,
+            Number(setting.priceAdjustment || 0),
+          )
+        })
+      })
       const groupIds = payload.groups.map((group) => group.modifierGroupId)
       const uniqueGroupIds = new Set(groupIds)
 
@@ -64,6 +80,23 @@ export default class ProductPersonalizationsController {
       for (const assignment of payload.groups) {
         const group = groupsMap.get(assignment.modifierGroupId)!
         const activeOptionsCount = group.options.length
+        const submittedOptions = assignment.options || []
+        const submittedOptionIds = submittedOptions.map((option) => option.modifierOptionId)
+
+        if (new Set(submittedOptionIds).size !== submittedOptionIds.length) {
+          await trx.rollback()
+          return response.unprocessableEntity({
+            message: `Una opción del grupo "${group.name}" fue enviada más de una vez.`,
+          })
+        }
+
+        const activeOptionIds = new Set(group.options.map((option) => option.id))
+        if (submittedOptionIds.some((optionId) => !activeOptionIds.has(optionId))) {
+          await trx.rollback()
+          return response.unprocessableEntity({
+            message: `Una opción del grupo "${group.name}" no está disponible.`,
+          })
+        }
 
         if (activeOptionsCount === 0) {
           await trx.rollback()
@@ -85,9 +118,9 @@ export default class ProductPersonalizationsController {
         .where('product_id', productId)
         .delete()
 
-      if (payload.groups.length) {
-        await ProductModifierGroup.createMany(
-          payload.groups.map((assignment, index) => ({
+      for (const [index, assignment] of payload.groups.entries()) {
+        const createdAssignment = await ProductModifierGroup.create(
+          {
             companyId,
             productId,
             modifierGroupId: assignment.modifierGroupId,
@@ -95,9 +128,33 @@ export default class ProductPersonalizationsController {
             maxSelections: assignment.selectionLimit,
             allowOptionQuantities: assignment.allowOptionQuantities,
             displayOrder: assignment.displayOrder ?? index,
-          })),
+          },
           { client: trx },
         )
+
+        const group = groupsMap.get(assignment.modifierGroupId)!
+        const optionPrices = assignment.options === undefined
+          ? group.options.map((option) => ({
+              modifierOptionId: option.id,
+              priceAdjustment:
+                currentPrices.get(`${assignment.modifierGroupId}:${option.id}`) || 0,
+            }))
+          : assignment.options
+
+        const pricedOptions = optionPrices.filter(
+          (option) => Number(option.priceAdjustment || 0) > 0,
+        )
+        if (pricedOptions.length) {
+          await ProductModifierOption.createMany(
+            pricedOptions.map((option) => ({
+              companyId,
+              productModifierGroupId: createdAssignment.id,
+              modifierOptionId: option.modifierOptionId,
+              priceAdjustment: Number(option.priceAdjustment),
+            })),
+            { client: trx },
+          )
+        }
       }
 
       await trx.commit()
@@ -128,6 +185,9 @@ export default class ProductPersonalizationsController {
       .preload('modifierGroupAssignments', (assignmentQuery) => {
         assignmentQuery
           .orderBy('display_order', 'asc')
+          .preload('optionSettings', (optionPriceQuery) => {
+            optionPriceQuery.where('company_id', companyId)
+          })
           .preload('modifierGroup', (groupQuery) => {
             if (!includeInactive) {
               groupQuery.where('is_active', true)
@@ -154,14 +214,19 @@ export default class ProductPersonalizationsController {
         selectionLimit: assignment.maxSelections,
         allowOptionQuantities: assignment.allowOptionQuantities,
         displayOrder: assignment.displayOrder,
-        options: assignment.modifierGroup.options.map((option) => ({
-          id: option.id,
-          modifierGroupId: option.modifierGroupId,
-          name: option.name,
-          displayOrder: option.displayOrder,
-          isActive: option.isActive,
-          priceAdjustment: 0,
-        })),
+        options: assignment.modifierGroup.options.map((option) => {
+          const setting = assignment.optionSettings.find(
+            (candidate) => candidate.modifierOptionId === option.id,
+          )
+          return {
+            id: option.id,
+            modifierGroupId: option.modifierGroupId,
+            name: option.name,
+            displayOrder: option.displayOrder,
+            isActive: option.isActive,
+            priceAdjustment: Number(setting?.priceAdjustment || 0),
+          }
+        }),
       }))
 
     return {

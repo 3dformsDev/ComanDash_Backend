@@ -45,6 +45,14 @@ export const syncProductPersonalizationsValidator = vine.compile(
         selectionLimit: vine.number().min(1).max(50),
         allowOptionQuantities: vine.boolean(),
         displayOrder: vine.number().min(0).optional(),
+        options: vine
+          .array(
+            vine.object({
+              modifierOptionId: vine.number().positive(),
+              priceAdjustment: vine.number().min(0).max(99999999.99),
+            }),
+          )
+          .optional(),
       }),
     ),
   }),

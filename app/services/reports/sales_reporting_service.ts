@@ -224,13 +224,52 @@ export async function buildSalesReport(
     )
     .groupBy("products.id", "products.name", "categories.id", "categories.name")
     .select(
+      "products.id as productId",
       "products.name as productName",
       "categories.name as category",
     )
     .sum("order_items.quantity as quantity")
     .sum("order_items.total_price as total")
+    .orderBy("quantity", "desc")
     .orderBy("total", "desc")
     .limit(100);
+
+  const optionBreakdownQuery = db
+    .from("order_item_modifier_selections")
+    .join(
+      "order_items",
+      "order_item_modifier_selections.order_item_id",
+      "order_items.id",
+    )
+    .join("orders", "order_items.order_id", "orders.id")
+    .where("orders.company_id", companyId)
+    .where("orders.location_id", locationId)
+    .where("orders.status", "paid")
+    .whereNotNull("orders.paid_at")
+    .whereRaw(
+      ...businessDateFilter(
+        "orders.paid_business_date",
+        "orders.paid_at",
+        range,
+      ),
+    )
+    .groupBy(
+      "order_items.product_id",
+      "order_item_modifier_selections.group_name_snapshot",
+      "order_item_modifier_selections.option_name_snapshot",
+    )
+    .select(
+      "order_items.product_id as productId",
+      "order_item_modifier_selections.group_name_snapshot as groupName",
+      "order_item_modifier_selections.option_name_snapshot as optionName",
+      db.raw(
+        "SUM(order_item_modifier_selections.quantity * order_items.quantity) as quantity",
+      ),
+      db.raw(
+        "COALESCE(SUM(order_item_modifier_selections.total_price_adjustment), 0) as total",
+      ),
+    )
+    .orderBy("quantity", "desc");
 
   const cutsQuery = db
     .from("orders")
@@ -313,6 +352,7 @@ export async function buildSalesReport(
     dailySales,
     chartData,
     tableRows,
+    optionBreakdown,
     cuts,
     cancelledOrders,
     inProcessOrders,
@@ -325,6 +365,7 @@ export async function buildSalesReport(
     dailySalesQuery,
     chartDataQuery,
     tableRowsQuery,
+    optionBreakdownQuery,
     cutsQuery,
     cancelledOrdersQuery,
     inProcessOrdersQuery,
@@ -364,10 +405,19 @@ export async function buildSalesReport(
       total: toNumber(row.total),
     })),
     tableRows: tableRows.map((row: any) => ({
+      productId: toNumber(row.productId),
       productName: row.productName,
       category: row.category,
       quantity: toNumber(row.quantity),
       total: toNumber(row.total),
+      optionBreakdown: optionBreakdown
+        .filter((option: any) => toNumber(option.productId) === toNumber(row.productId))
+        .map((option: any) => ({
+          groupName: option.groupName,
+          optionName: option.optionName,
+          quantity: toNumber(option.quantity),
+          total: toNumber(option.total),
+        })),
     })),
     dailySales: dailySales.map((row: any) => ({
       day: row.day,

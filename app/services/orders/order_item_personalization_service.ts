@@ -1,5 +1,6 @@
 import OrderItemModifierSelection from '#models/order_item_modifier_selection'
 import ProductModifierGroup from '#models/product_modifier_group'
+import { Decimal } from 'decimal.js'
 
 export interface ModifierSelectionInput {
   modifierGroupId: number
@@ -10,6 +11,7 @@ export interface ModifierSelectionInput {
 interface ValidatedModifierSelection extends ModifierSelectionInput {
   groupName: string
   optionName: string
+  unitPriceAdjustment: number
   displayOrder: number
 }
 
@@ -43,6 +45,9 @@ export default class OrderItemPersonalizationService {
       .where('company_id', companyId)
       .where('product_id', item.productId)
       .orderBy('display_order', 'asc')
+      .preload('optionSettings', (optionPriceQuery) => {
+        optionPriceQuery.where('company_id', companyId)
+      })
       .preload('modifierGroup', (groupQuery) => {
         groupQuery
           .where('company_id', companyId)
@@ -140,6 +145,11 @@ export default class OrderItemPersonalizationService {
           ...selection,
           groupName: assignment.modifierGroup.name,
           optionName: option.name,
+          unitPriceAdjustment: Number(
+            assignment.optionSettings.find(
+              (setting) => setting.modifierOptionId === option.id,
+            )?.priceAdjustment || 0,
+          ),
           displayOrder: assignment.displayOrder * 1000 + index,
         })
       })
@@ -152,6 +162,7 @@ export default class OrderItemPersonalizationService {
     orderItemId: number,
     companyId: number,
     selections: ValidatedModifierSelection[],
+    itemQuantity: number,
     trx: any,
   ): Promise<void> {
     if (selections.length === 0) return
@@ -165,8 +176,11 @@ export default class OrderItemPersonalizationService {
         groupNameSnapshot: selection.groupName,
         optionNameSnapshot: selection.optionName,
         quantity: selection.quantity,
-        unitPriceAdjustment: 0,
-        totalPriceAdjustment: 0,
+        unitPriceAdjustment: selection.unitPriceAdjustment,
+        totalPriceAdjustment: new Decimal(selection.unitPriceAdjustment)
+          .times(selection.quantity)
+          .times(itemQuantity)
+          .toNumber(),
         displayOrder: selection.displayOrder,
       })),
       { client: trx },
@@ -177,6 +191,7 @@ export default class OrderItemPersonalizationService {
     orderItemId: number,
     companyId: number,
     selections: OrderItemModifierSelection[],
+    itemQuantity: number,
     trx: any,
   ): Promise<void> {
     if (selections.length === 0) return
@@ -190,11 +205,54 @@ export default class OrderItemPersonalizationService {
         groupNameSnapshot: selection.groupNameSnapshot,
         optionNameSnapshot: selection.optionNameSnapshot,
         quantity: selection.quantity,
-        unitPriceAdjustment: 0,
-        totalPriceAdjustment: 0,
+        unitPriceAdjustment: selection.unitPriceAdjustment,
+        totalPriceAdjustment: new Decimal(selection.unitPriceAdjustment || 0)
+          .times(selection.quantity)
+          .times(itemQuantity)
+          .toNumber(),
         displayOrder: selection.displayOrder,
       })),
       { client: trx },
     )
+  }
+
+  calculateSelectionsUnitTotal(selections: ValidatedModifierSelection[]): Decimal {
+    return selections.reduce(
+      (total, selection) =>
+        total.plus(new Decimal(selection.unitPriceAdjustment).times(selection.quantity)),
+      new Decimal(0),
+    )
+  }
+
+  calculatePersistedSelectionsUnitTotal(
+    selections: OrderItemModifierSelection[],
+  ): Decimal {
+    return selections.reduce(
+      (total, selection) =>
+        total.plus(
+          new Decimal(selection.unitPriceAdjustment || 0).times(selection.quantity),
+        ),
+      new Decimal(0),
+    )
+  }
+
+  calculateLineTotal(
+    productUnitPrice: Decimal.Value,
+    itemQuantity: number,
+    selections: ValidatedModifierSelection[],
+  ): Decimal {
+    return new Decimal(productUnitPrice)
+      .plus(this.calculateSelectionsUnitTotal(selections))
+      .times(itemQuantity)
+  }
+
+  calculatePersistedLineTotal(
+    productUnitPrice: Decimal.Value,
+    itemQuantity: number,
+    selections: OrderItemModifierSelection[],
+  ): Decimal {
+    return new Decimal(productUnitPrice)
+      .plus(this.calculatePersistedSelectionsUnitTotal(selections))
+      .times(itemQuantity)
   }
 }

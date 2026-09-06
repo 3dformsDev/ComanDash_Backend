@@ -616,8 +616,11 @@ export default class CashRegisterSessionsController {
         ordersFinished: summary.totalOrders,
         ordersCancelled: summary.cancelledOrders,
         topProducts: report.tableRows.slice(0, 5).map((product) => ({
+          id: product.productId,
           name: product.productName,
           count: product.quantity,
+          total: product.total,
+          optionBreakdown: product.optionBreakdown,
           category: {
             name: product.category,
           },

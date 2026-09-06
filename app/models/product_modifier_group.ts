@@ -1,9 +1,10 @@
 import { DateTime } from 'luxon'
-import { belongsTo, column } from '@adonisjs/lucid/orm'
-import type { BelongsTo } from '@adonisjs/lucid/types/relations'
+import { belongsTo, column, hasMany } from '@adonisjs/lucid/orm'
+import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
 import Company from '#models/company'
 import ModifierGroup from '#models/modifier_group'
 import Product from '#models/product'
+import ProductModifierOption from '#models/product_modifier_option'
 import TenantBase from './tenant_base.js'
 
 export default class ProductModifierGroup extends TenantBase {
@@ -45,4 +46,7 @@ export default class ProductModifierGroup extends TenantBase {
 
   @belongsTo(() => ModifierGroup)
   declare modifierGroup: BelongsTo<typeof ModifierGroup>
+
+  @hasMany(() => ProductModifierOption)
+  declare optionSettings: HasMany<typeof ProductModifierOption>
 }

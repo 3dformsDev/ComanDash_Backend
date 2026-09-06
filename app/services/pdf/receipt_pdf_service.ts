@@ -155,6 +155,14 @@ export default class ReceiptPdfService {
 
       for (const item of order.orderItems) {
         const itemTotal = Number(item.totalPrice);
+        const modifierSelections = item.modifierSelections || [];
+        const modifiersTotal = modifierSelections.reduce(
+          (total, selection) => total + Number(selection.totalPriceAdjustment || 0),
+          0,
+        );
+        const baseItemTotal = item.unitPrice !== null && item.unitPrice !== undefined
+          ? Number(item.unitPrice) * Number(item.quantity || 0)
+          : Math.max(itemTotal - modifiersTotal, 0);
 
         subtotal += itemTotal;
 
@@ -173,14 +181,14 @@ export default class ReceiptPdfService {
 
         doc
           .font("Helvetica-Bold")
-          .text(`$${itemTotal.toLocaleString("es-CO")}`, 140, currentY, {
+          .text(`$${baseItemTotal.toLocaleString("es-CO")}`, 140, currentY, {
             width: 55,
             align: "right",
           });
 
         doc.y = currentY + Math.max(productNameHeight, 12) + 4;
 
-        for (const selection of item.modifierSelections || []) {
+        for (const selection of modifierSelections) {
           const quantityPrefix = selection.quantity > 1 ? `${selection.quantity}x ` : "";
           const optionText = `• ${quantityPrefix}${selection.optionNameSnapshot}`;
           const optionY = doc.y;
@@ -195,6 +203,15 @@ export default class ReceiptPdfService {
               width: 110,
               align: "left",
             });
+          const optionTotal = Number(selection.totalPriceAdjustment || 0);
+          if (optionTotal > 0) {
+            doc
+              .font("Helvetica-Bold")
+              .text(`+$${optionTotal.toLocaleString("es-CO")}`, 140, optionY, {
+                width: 55,
+                align: "right",
+              });
+          }
           doc.fillColor("#000000");
           doc.y = optionY + Math.max(optionHeight, 9) + 2;
         }

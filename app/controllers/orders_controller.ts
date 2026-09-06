@@ -659,12 +659,10 @@ export default class OrdersController {
 
         // Variable para la respuesta final
         let financialChange = new Decimal(0);
+        let initialPaidItemsTotal = new Decimal(0);
 
         // --- LÓGICA DE PAGO SÓLO SI LA ORDEN ESTÁ PAGADA ---
         if (order.status === "paid") {
-          let priceDelta = new Decimal(0);
-          let hasFinancialChange = false;
-
           // Validaciones de estado para órdenes pagadas
           const protectedItems = new Map<
             number,
@@ -725,20 +723,33 @@ export default class OrdersController {
             }
           }
 
-          // Cálculo financiero robusto
-          const initialTotalValue = order.orderItems.reduce(
+          initialPaidItemsTotal = order.orderItems.reduce(
             (sum, item) => sum.plus(item.totalPrice),
             new Decimal(0),
           );
-          const finalTotalValue = orderItems.reduce((sum, item) => {
-            const product = productsMap.get(item.productId)!;
-            const unitPrice = product.getPriceAsDecimal();
-            return sum.plus(unitPrice.times(item.quantity));
-          }, new Decimal(0));
+        }
 
-          priceDelta = finalTotalValue.minus(initialTotalValue);
-          hasFinancialChange = !priceDelta.isZero();
-          financialChange = priceDelta; // Guardar para la respuesta
+        // --- ESTAS OPERACIONES SE EJECUTAN SIEMPRE (PARA ÓRDENES PAGADAS Y NO PAGADAS) ---
+
+        // 1. Sincronizar los items de la orden
+        await this.updateOrderItemsOptimized(
+          order.id,
+          orderItems,
+          productsMap,
+          companyId,
+          trx,
+        );
+
+        // 2. Recalcular los totales de la orden
+        const { success, totalAmount, subtotal } =
+          await this.calculateOrderTotals(order.id, trx);
+        if (!success)
+          throw new Error("Error al calcular los totales de la orden");
+
+        if (order.status === "paid") {
+          const priceDelta = new Decimal(subtotal).minus(initialPaidItemsTotal);
+          const hasFinancialChange = !priceDelta.isZero();
+          financialChange = priceDelta;
 
           if (hasFinancialChange && !paymentMethodId) {
             await trx.rollback();
@@ -746,13 +757,10 @@ export default class OrdersController {
               message:
                 "Se requiere un método de pago/reembolso para modificar los items de una orden ya pagada.",
               code: "PAYMENT_METHOD_REQUIRED",
-              data: {
-                changeAmount: priceDelta.toNumber(),
-              },
+              data: { changeAmount: priceDelta.toNumber() },
             });
           }
 
-          // Creación de registros de pago/reembolso
           if (hasFinancialChange && paymentMethodId) {
             if (priceDelta.greaterThan(0)) {
               await this.addOrderPaymentOptimized(
@@ -786,7 +794,7 @@ export default class OrdersController {
                 },
                 { client: trx },
               );
-            } else if (priceDelta.lessThan(0)) {
+            } else {
               const refundAmount = priceDelta.abs();
               await this.addOrderPaymentOptimized(
                 order.id,
@@ -822,23 +830,6 @@ export default class OrdersController {
             }
           }
         }
-
-        // --- ESTAS OPERACIONES SE EJECUTAN SIEMPRE (PARA ÓRDENES PAGADAS Y NO PAGADAS) ---
-
-        // 1. Sincronizar los items de la orden
-        await this.updateOrderItemsOptimized(
-          order.id,
-          orderItems,
-          productsMap,
-          companyId,
-          trx,
-        );
-
-        // 2. Recalcular los totales de la orden
-        const { success, totalAmount, subtotal } =
-          await this.calculateOrderTotals(order.id, trx);
-        if (!success)
-          throw new Error("Error al calcular los totales de la orden");
 
         // 3. Preparar y guardar los datos actualizados de la orden
         const orderUpdateData = {
@@ -1270,6 +1261,7 @@ export default class OrdersController {
     const personalizationService = new OrderItemPersonalizationService();
     const itemsToInsert: Array<{
       data: Parameters<typeof OrderItem.create>[0];
+      quantity: number;
       persistedSelections?: OrderItem["modifierSelections"];
       validatedSelections?: Awaited<ReturnType<OrderItemPersonalizationService["validate"]>>;
     }> = [];
@@ -1304,6 +1296,7 @@ export default class OrdersController {
         }
 
         itemsToInsert.push({
+          quantity: currentItem.quantity,
           data: {
             orderId,
             productId: currentItem.productId,
@@ -1321,13 +1314,19 @@ export default class OrdersController {
 
         const additionalQuantity = itemData.quantity - currentItem.quantity;
         if (additionalQuantity > 0) {
+          const additionalTotal = personalizationService.calculatePersistedLineTotal(
+            unitPrice,
+            additionalQuantity,
+            currentItem.modifierSelections,
+          );
           itemsToInsert.push({
+            quantity: additionalQuantity,
             data: {
               orderId,
               productId: itemData.productId,
               quantity: additionalQuantity,
               unitPrice: product.price,
-              totalPrice: unitPrice.times(additionalQuantity).toNumber(),
+              totalPrice: additionalTotal.toNumber(),
               kitchenStatus: "in_preparation",
               kitchenStartedAt: DateTime.now(),
               specialInstructions: null,
@@ -1344,13 +1343,19 @@ export default class OrdersController {
         trx,
         Boolean(currentItem && currentItem.modifierSelections.length === 0),
       );
+      const itemTotal = personalizationService.calculateLineTotal(
+        unitPrice,
+        itemData.quantity,
+        validatedSelections,
+      );
       itemsToInsert.push({
+        quantity: itemData.quantity,
         data: {
           orderId,
           productId: itemData.productId,
           quantity: itemData.quantity,
           unitPrice: product.price,
-          totalPrice: unitPrice.times(itemData.quantity).toNumber(),
+          totalPrice: itemTotal.toNumber(),
           kitchenStatus: "in_preparation",
           kitchenStartedAt: DateTime.now(),
           specialInstructions: currentItem?.specialInstructions || null,
@@ -1368,6 +1373,7 @@ export default class OrdersController {
           createdItem.id,
           companyId,
           itemToInsert.persistedSelections,
+          itemToInsert.quantity,
           trx,
         );
       } else if (itemToInsert.validatedSelections) {
@@ -1375,6 +1381,7 @@ export default class OrdersController {
           createdItem.id,
           companyId,
           itemToInsert.validatedSelections,
+          itemToInsert.quantity,
           trx,
         );
       }
@@ -1566,22 +1573,19 @@ export default class OrdersController {
           throw new Error(`Producto "${productData.name}" no está disponible`);
         }
 
-        // MODIFICADO: Usar el método del modelo para obtener el precio como Decimal.
-        const unitPriceDecimal = productData.getPriceAsDecimal();
-        // MODIFICADO: Calcular el precio total del item usando los métodos de Decimal.js.
-        const itemTotalPriceDecimal = unitPriceDecimal.times(
-          itemToAdd.quantity,
-        );
-
-        // MODIFICADO: Acumular el subtotal usando .plus() para mantener la precisión.
-        subtotal = subtotal.plus(itemTotalPriceDecimal);
-
         const personalizationService = new OrderItemPersonalizationService();
         const modifierSelections = await personalizationService.validate(
           companyId,
           itemToAdd,
           trx,
         );
+        const itemTotalPriceDecimal = personalizationService.calculateLineTotal(
+          productData.getPriceAsDecimal(),
+          itemToAdd.quantity,
+          modifierSelections,
+        );
+
+        subtotal = subtotal.plus(itemTotalPriceDecimal);
 
         const orderItem = await OrderItem.create(
           {
@@ -1604,6 +1608,7 @@ export default class OrdersController {
           orderItem.id,
           companyId,
           modifierSelections,
+          itemToAdd.quantity,
           trx,
         );
       }
