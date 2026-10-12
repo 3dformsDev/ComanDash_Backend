@@ -6,6 +6,10 @@ import Product from '#models/product'
 import ProductModifierGroup from '#models/product_modifier_group'
 import ProductModifierOption from '#models/product_modifier_option'
 import { syncProductPersonalizationsValidator } from '#validators/modifier_personalization'
+import InventoryAccessService from '#services/inventory/inventory_access_service'
+import InventoryLedgerService from '#services/inventory/inventory_ledger_service'
+import { InventoryError } from '#services/inventory/inventory_math'
+import { io } from '#start/socket'
 
 export default class ProductPersonalizationsController {
   async show({ params, request, response, companyId }: HttpContext) {
@@ -25,14 +29,17 @@ export default class ProductPersonalizationsController {
     }
   }
 
-  async sync({ params, request, response, companyId }: HttpContext) {
+  async sync(ctx: HttpContext) {
+    const { params, request, response, companyId } = ctx
     const trx = await db.transaction()
 
     try {
       const productId = Number(params.id)
+      if (ctx.locationId) await trx.from('locations').where('company_id', companyId).where('id', ctx.locationId).forUpdate().firstOrFail()
       await Product.query({ client: trx })
         .where('id', productId)
         .where('company_id', companyId)
+        .forUpdate()
         .firstOrFail()
 
       const payload = await request.validateUsing(syncProductPersonalizationsValidator)
@@ -113,6 +120,18 @@ export default class ProductPersonalizationsController {
         }
       }
 
+      const obsoleteComponentsQuery = trx.from('product_option_inventory_components').where('company_id', companyId).where('product_id', productId)
+      if (groupIds.length) obsoleteComponentsQuery.whereNotIn('modifier_group_id', groupIds)
+      const obsoleteComponents = await obsoleteComponentsQuery.forUpdate()
+      if (obsoleteComponents.length) {
+        const scope = await InventoryAccessService.scope(ctx, true, trx)
+        await new InventoryLedgerService(trx, scope).operation('components', { reason: 'Se retiraron grupos de opciones del producto.',
+          details: JSON.stringify({ productId, removedComponents: obsoleteComponents }) })
+        await trx.from('product_option_inventory_components').where('company_id', companyId).where('product_id', productId)
+          .whereIn('id', obsoleteComponents.map((c: any) => c.id)).delete()
+        trx.after('commit', () => { try { io.to(`inventory_company_${companyId}`).emit('inventory_changed') } catch (error) { ctx.logger.warn({err: error}, 'Inventory notification failed') } })
+      }
+
       await ProductModifierGroup.query({ client: trx })
         .where('company_id', companyId)
         .where('product_id', productId)
@@ -166,6 +185,7 @@ export default class ProductPersonalizationsController {
       if (!trx.isCompleted) {
         await trx.rollback()
       }
+      if (error instanceof InventoryError) return response.status(error.status).send({ message: error.message, code: error.code })
       if (error.code === 'E_VALIDATION_ERROR' || error.code === 'E_VALIDATION_FAILURE') {
         return response.unprocessableEntity({ errors: error.messages })
       }

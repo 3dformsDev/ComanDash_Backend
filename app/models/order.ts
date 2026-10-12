@@ -12,6 +12,8 @@ import OrderItem from "./order_item.js";
 import OrderAdjustment from "./order_adjustment.js";
 
 export default class Order extends TenantBase {
+  @column()
+  declare inventoryVersion: number;
   @column({ isPrimary: true })
   declare id: number;
 

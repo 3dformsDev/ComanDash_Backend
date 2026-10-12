@@ -10,6 +10,14 @@ import OrderItemModifierSelection from '#models/order_item_modifier_selection'
 export type KitchenStatus = 'pending' | 'in_preparation' | 'ready' | 'served'
 
 export default class OrderItem extends BaseModel {
+  @column()
+  declare inventoryLineKey: string | null
+
+  @column({
+    prepare: (value: unknown) => value == null ? null : JSON.stringify(value),
+    consume: (value: unknown) => typeof value === 'string' ? JSON.parse(value) : value,
+  })
+  declare inventoryComposition: import('#services/inventory/inventory_math').Component[] | null
   @column({ isPrimary: true })
   declare id: number
 

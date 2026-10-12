@@ -70,6 +70,7 @@ export default class CashRegisterOperatingService {
     const configuredCutoffHour = await getBusinessDayCutoffHour(
       companyId,
       locationId,
+      options.trx,
     )
 
     if (!session) {

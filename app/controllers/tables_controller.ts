@@ -5,8 +5,51 @@ import { io } from '#start/socket'
 import { createTableValidatorWithCompany, updateTableValidatorWithCompany } from '#validators/table'
 import type { HttpContext } from '@adonisjs/core/http'
 import cache from '@adonisjs/cache/services/main'
+import db from '@adonisjs/lucid/services/db'
+import ActivityLog from '#models/activity_log'
+import { blocksTableRecovery } from '#services/table_availability'
 
 export default class TablesController {
+  async recoverAvailability({ auth, request, response, params, companyId, locationId, logger }: HttpContext) {
+    const user = await auth.getUserOrFail()
+    await user.load('role')
+    if (!['admin', 'super_admin', 'manager'].includes(user.role?.code) || !locationId) {
+      return response.forbidden({ message: 'No tienes permiso para liberar esta mesa.' })
+    }
+    if (!Number.isSafeInteger(Number(params.id)) || Number(params.id) <= 0 || request.input('confirmEmpty') !== true) {
+      return response.badRequest({ message: 'Confirma que la mesa está vacía antes de liberarla.' })
+    }
+    try {
+      const table = await db.transaction(async (trx) => {
+        // Same first lock as order mutations: no sale can occupy the table during this check.
+        await trx.from('locations').where('company_id', companyId).where('id', locationId).forUpdate().firstOrFail()
+        const target = await Table.query({ client: trx }).where('company_id', companyId)
+          .where('location_id', locationId!).where('id', params.id).forUpdate().firstOrFail()
+        const orders = await Order.query({ client: trx }).where('company_id', companyId)
+          .where('location_id', locationId!).where('table_id', target.id).where('is_freed_table', false).forUpdate()
+        if (orders.some(blocksTableRecovery)) {
+          throw Object.assign(new Error('Esta mesa tiene una comanda pendiente. Termínala antes de liberarla.'), { code: 'TABLE_HAS_PENDING_ORDER' })
+        }
+        for (const order of orders) await order.merge({ isFreedTable: true }).save()
+        await target.merge({ isBussy: false }).save()
+        await ActivityLog.create({ companyId, userId: user.id, action: 'table_availability_recovered',
+          resourceType: 'table', resourceId: target.id, details: { locationId, orderIds: orders.map((o) => o.id), confirmedEmpty: true },
+          ipAddress: request.ip(), userAgent: request.header('user-agent') }, { client: trx })
+        return target
+      })
+      try {
+        await cache.namespace(`tables:${companyId}`).clear()
+        await cache.delete({ key: `table:${companyId}:${locationId}:${table.id}` })
+        io.to(`kitchen_room_${companyId}_${locationId}`).emit('tables_changed', { tableId: table.id })
+      } catch (error) { logger.warn({ err: error }, 'Table recovered; refresh notification failed') }
+      return response.ok(table)
+    } catch (error) {
+      if (error.code === 'TABLE_HAS_PENDING_ORDER') return response.conflict({ message: error.message })
+      if (error.code === 'E_ROW_NOT_FOUND') return response.notFound({ message: 'No se encontró la mesa en esta sede.' })
+      logger.error({ err: error }, 'Table recovery failed')
+      return response.internalServerError({ message: 'No se pudo liberar la mesa. Intenta nuevamente.' })
+    }
+  }
   /**
      * List all tables for the authenticated user's company.
      */
@@ -40,7 +83,8 @@ export default class TablesController {
           }
 
           const paginatedResult = await query.orderByRaw("(number REGEXP '^[0-9]+$') DESC, CAST(number AS UNSIGNED) ASC, number ASC").paginate(page, perPage)
-          return paginatedResult.toJSON() // Serializar para la caché
+          const serialized = paginatedResult.toJSON() // Serializar para la caché
+          return serialized
         },
         ttl: '1h' // Las mesas cambian muy poco, un TTL largo es adecuado
       })

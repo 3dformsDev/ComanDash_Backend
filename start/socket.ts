@@ -1,9 +1,9 @@
 // start/socket.ts
 
 import SocketAuthMiddleware, { createSocketAuthMiddleware } from '#middleware/sockets/socket_auth_middleware'
-import OrderItem from '#models/order_item'
+import KitchenService from '#services/kitchen_service'
+import { KitchenOperationError } from '#services/kitchen_state'
 import adonisServer from '@adonisjs/core/services/server'
-import { DateTime } from 'luxon'
 import { Server } from 'socket.io'
 
 export const io = new Server({
@@ -34,6 +34,11 @@ export function startSocketServer() {
     io.use(authMiddleware.validateTokenOnEvent())
 
     io.on('connection', (socket) => {
+        const inventoryUser = socket.data.user;
+        if (inventoryUser?.companyId && inventoryUser?.locationId) {
+            socket.join(`inventory_${inventoryUser.companyId}_${inventoryUser.locationId}`);
+            socket.join(`inventory_company_${inventoryUser.companyId}`);
+        }
         console.log('✅✅✅ ¡CLIENTE CONECTADO! ID:', socket.id, '✅✅✅')
 
         // Agregar un pequeño delay para asegurar que la conexión esté lista
@@ -49,10 +54,15 @@ export function startSocketServer() {
         // Permitimos que los clientes se unan a "salas" específicas.
         // La cocina se unirá a la sala de su compañía.
         socket.on('join_kitchen_room', (data) => {
-            if (data && data.companyId && data.locationId) {
-                const roomName = `kitchen_room_${data.companyId}_${data.locationId}`;
+            const user = socket.data.user;
+            if (user?.isActive && user.companyId && user.locationId &&
+                Number(data?.companyId) === user.companyId && Number(data?.locationId) === user.locationId &&
+                !socket.data.accessToken?.isExpired()) {
+                const roomName = `kitchen_room_${user.companyId}_${user.locationId}`;
                 socket.join(roomName);
                 console.log(`🖥️  Socket ${socket.id} se unió a la sala: ${roomName}`);
+            } else {
+                socket.emit('operation_error', { message: 'No puedes acceder a esta cocina.' });
             }
         });
 
@@ -62,49 +72,37 @@ export function startSocketServer() {
         })
 
         socket.on('item_status_changed', async (data) => {
+            const user = socket.data.user;
+            const orderId = Number(data?.orderId);
+            const itemId = Number(data?.itemId);
+            const audit = { userId: user?.id, companyId: user?.companyId, locationId: user?.locationId,
+                socketId: socket.id, orderId, itemId };
             try {
-                const { orderId, itemId, newStatus } = data;
-
-                // 1. データベース Actualizar el estado en la Base de Datos
-                // Buscamos el item específico y actualizamos su estado 'isReady'
-                const orderItem = await OrderItem.findOrFail(itemId);
-
-                // ✅ LÓGICA CORREGIDA SEGÚN TU MODELO
-                if (newStatus === true) {
-                    // Si el frontend dice que está listo (true)
-                    orderItem.kitchenStatus = 'pending'
-                    // Opcional pero recomendado: registrar el momento exacto en que estuvo listo
-                    orderItem.kitchenReadyAt = DateTime.now()
-                } else {
-                    // Si el frontend lo desmarca (false), lo volvemos a 'pending'
-                    orderItem.kitchenStatus = 'in_preparation'
-                    // Opcional: limpiar el timestamp de cuándo estuvo listo
-                    orderItem.kitchenReadyAt = null
+                if (!user?.isActive || !user.companyId || !user.locationId ||
+                    !socket.data.accessToken || socket.data.accessToken.isExpired()) {
+                    throw new KitchenOperationError('KITCHEN_UNAUTHORIZED', 'Vuelve a iniciar sesión para continuar.', 401);
                 }
-
-                // Guardamos los cambios en la base de datos
-                await orderItem.save();
-                console.log(`[DB] Ítem ${itemId} actualizado a kitchenStatus='${orderItem.kitchenStatus}'`);
-
-                // El resto de la lógica para transmitir el cambio es EXACTAMENTE la misma
-                const room = Array.from(socket.rooms).find(r => r.startsWith('kitchen_room_'));
-
-                if (room) {
-                    console.log(`[Socket] Transmitiendo a la sala ${room}: ítem ${itemId} actualizado.`);
-                    io.to(room).emit('kitchen_item_updated', {
-                        orderId: orderId,
-                        itemId: itemId,
-                        newStatus: newStatus, // Seguimos enviando el booleano al frontend
-                    });
-                } else {
-                    console.warn(`[Socket] El socket ${socket.id} intentó actualizar un ítem sin estar en una sala de cocina.`);
+                if (!Number.isSafeInteger(orderId) || orderId <= 0 || !Number.isSafeInteger(itemId) || itemId <= 0 ||
+                    typeof data?.newStatus !== 'boolean') {
+                    throw new KitchenOperationError('KITCHEN_INVALID_EVENT', 'No se pudo identificar el producto.', 400);
                 }
-
-
+                const room = `kitchen_room_${user.companyId}_${user.locationId}`;
+                if (!socket.rooms.has(room)) {
+                    throw new KitchenOperationError('KITCHEN_ROOM_REQUIRED', 'Abre la cocina antes de cambiar un producto.', 403);
+                }
+                const result = await KitchenService.changeItem(
+                    { companyId: user.companyId, locationId: user.locationId }, orderId, itemId, data.newStatus,
+                );
+                console.info('[KITCHEN] item_changed', JSON.stringify({ ...audit, ...result }));
+                io.to(room).emit('kitchen_item_updated', result);
             } catch (error) {
-                console.error('❌ Error en evento "item_status_changed":', error);
-                // Opcional: Notificar al cliente que originó el evento sobre el error
-                socket.emit('operation_error', { message: 'No se pudo actualizar el estado del ítem.' });
+                if (error instanceof KitchenOperationError) {
+                    console.warn('[KITCHEN] item_rejected', JSON.stringify({ ...audit, code: error.code }));
+                    socket.emit('operation_error', { orderId, itemId, code: error.code, message: error.message });
+                } else {
+                    console.error('[KITCHEN] item_failed', audit, error);
+                    socket.emit('operation_error', { orderId, itemId, message: 'No se pudo actualizar el producto.' });
+                }
             }
         });
 

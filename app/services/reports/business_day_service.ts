@@ -1,4 +1,5 @@
 import CompanySetting from "#models/company_setting";
+import type { TransactionClientContract } from "@adonisjs/lucid/types/database";
 import { DateTime } from "luxon";
 
 export const BUSINESS_TIME_ZONE = "America/Bogota";
@@ -93,8 +94,9 @@ export function getBusinessDateRange(
 export async function getBusinessDayCutoffHour(
   companyId: number,
   locationId: number,
+  trx?: TransactionClientContract,
 ): Promise<number> {
-  const setting = await CompanySetting.query()
+  const setting = await CompanySetting.query(trx ? { client: trx } : undefined)
     .where("company_id", companyId)
     .where("setting_key", getBusinessDaySettingKey(locationId))
     .first();

@@ -3,6 +3,7 @@ import CashMovement from "#models/cash_movement";
 import CashRegister from "#models/cash_register";
 import CashRegisterSession from "#models/cash_registers_session";
 import Order from "#models/order";
+import CashRegisterSummaryService from '#services/cash_register_summary_service';
 import {
   BUSINESS_TIME_ZONE,
   DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
@@ -256,26 +257,10 @@ export default class CashRegisterSessionsController {
       // --- FIN DEL BLOQUE DE VALIDACIÓN MODIFICADO ---
 
       // 3. Calcular balances en el backend
-      const movements = await CashMovement.query({ client: trx }).where(
-        "cash_register_session_id",
-        params.id,
+      const financialSummary = await CashRegisterSummaryService.build(
+        companyId, cashRegisterSession.id, cashRegisterSession.openingBalance, trx,
       );
-
-      let totalSales = new Decimal(0);
-      let totalWithdrawals = new Decimal(0);
-
-      movements.forEach((movement) => {
-        if (movement.movementType === "sale") {
-          totalSales = totalSales.plus(movement.amount);
-        } else if (movement.movementType === "withdrawal") {
-          totalWithdrawals = totalWithdrawals.plus(movement.amount);
-        }
-      });
-
-      const openingBalance = new Decimal(cashRegisterSession.openingBalance);
-      const calculatedClosingBalance = openingBalance
-        .plus(totalSales)
-        .minus(totalWithdrawals);
+      const calculatedClosingBalance = new Decimal(financialSummary.expectedClosingBalance);
       const realClosingBalance = new Decimal(payload.realClosingBalance);
       const differenceAmount = realClosingBalance.minus(
         calculatedClosingBalance,
@@ -381,69 +366,9 @@ export default class CashRegisterSessionsController {
         return response.ok({ data: closedSummary });
       }
 
-      // --- Inicia el cálculo para una sesión abierta ---
-      const openingBalance = new Decimal(cashRegisterSession.openingBalance);
-
-      // ✅ 1. NUEVA LÓGICA: Calcular las ventas y el desglose desde la misma fuente.
-      // Obtenemos los pagos de órdenes NO canceladas para el desglose.
-      const incomeSummary = await db
-        .from("order_payments")
-        .join(
-          "payment_methods",
-          "order_payments.payment_method_id",
-          "=",
-          "payment_methods.id",
-        )
-        .join("orders", "order_payments.order_id", "=", "orders.id")
-        .where("order_payments.cash_register_session_id", params.id)
-        .where("orders.status", "paid") // ✅ CAMBIO: Solo órdenes pagadas, no solo "no canceladas"
-        .whereNotNull("paid_at")
-        .groupBy("payment_methods.name")
-        .select(
-          "payment_methods.name as paymentMethodName",
-          db.raw("SUM(order_payments.amount) as totalAmount"),
-        );
-
-      // ✅ 2. OBTENER EL TOTAL DE VENTAS REAL a partir de la tabla de órdenes
-      const salesResult = await db
-        .from("orders")
-        .where("cash_register_session_id", params.id)
-        .where("status", "paid")
-        .sum("total_amount as total")
-        .first();
-
-      let totalSales = new Decimal(salesResult.total || 0);
-
-      // 3. Consulta de retiros (sin cambios, ya era correcta)
-      const withdrawalsResult = await CashMovement.query()
-        .where("cash_register_session_id", params.id)
-        .where("movementType", "withdrawal")
-        .sum("amount as total")
-        .first();
-
-      const totalWithdrawals = new Decimal(
-        withdrawalsResult?.$extras.total || 0,
-      );
-
-      // 4. Calcular el balance esperado con el total de ventas correcto
-      const expectedClosingBalance = openingBalance
-        .plus(totalSales)
-        .minus(totalWithdrawals);
-
-      // 5. Construir la respuesta
       const summary = {
         status: cashRegisterSession.status,
-        openingBalance: openingBalance.toNumber(),
-        transactions: {
-          incomeByPaymentMethod: incomeSummary.map((item) => ({
-            name: item.paymentMethodName,
-            total: new Decimal(item.totalAmount).toNumber(),
-          })),
-          // Usamos el total de ventas REAL
-          totalSales: totalSales.toNumber(),
-          totalWithdrawals: totalWithdrawals.toNumber(),
-        },
-        expectedClosingBalance: expectedClosingBalance.toNumber(),
+        ...await CashRegisterSummaryService.build(companyId, cashRegisterSession.id, cashRegisterSession.openingBalance),
       };
 
       return response.ok({ data: summary });

@@ -9,6 +9,8 @@
     "build": "node ace build",
     "dev": "node ace serve --hmr",
     "test": "node ace test",
+    "test:release-fixes": "node --loader ts-node-maintained/esm --test tests/unit/inventory_math.node-test.ts tests/unit/inventory_schema.node-test.ts tests/unit/cash_register_math.node-test.ts tests/unit/table_availability.node-test.ts tests/unit/cash_recovery_connection.node-test.ts tests/unit/kitchen_safety.node-test.ts tests/unit/inventory_connection.node-test.ts",
+    "test:inventory": "node --loader ts-node-maintained/esm --test tests/unit/inventory_math.node-test.ts tests/unit/inventory_schema.node-test.ts",
     "typecheck": "tsc --noEmit"
   },
   "imports": {

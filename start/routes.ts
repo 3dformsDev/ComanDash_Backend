@@ -16,6 +16,7 @@ import RolesController from '#controllers/roles_controller';
 import PaymentMethodsController from '#controllers/payment_methods_controller';
 import CategoriesController from '#controllers/categories_controller';
 import ProductsController from '#controllers/products_controller';
+import InventoryController from '#controllers/inventory_controller';
 import TablesController from '#controllers/tables_controller';
 import TableZonesController from '#controllers/table_zones_controller';
 import CashRegistersController from '#controllers/cash_registers_controller';
@@ -103,6 +104,7 @@ router.group(() => {
     .middleware([
       middleware.auth(),
       middleware.companyContext(),
+      middleware.inventoryMutation(),
       middleware.ensureCashRegisterIsOpen(),
       middleware.ensureCashTransactionAllowed(),
     ])
@@ -141,10 +143,12 @@ router.group(() => {
       middleware.companyContext(),
     ])
     .middleware('store', [
+      middleware.inventoryMutation(),
       middleware.ensureCashRegisterIsOpen(),
       middleware.ensureCashTransactionAllowed(),
     ])
     .middleware('update', [
+      middleware.inventoryMutation(),
       middleware.ensureCashRegisterIsOpen(),
       middleware.ensureCashTransactionAllowed(),
     ])
@@ -152,6 +156,15 @@ router.group(() => {
       middleware.ensureCashRegisterIsOpen(),
       middleware.ensureCashTransactionAllowed(),
     ])
+
+  router.group(() => {
+    router.get('balances', [InventoryController, 'balances'])
+    router.put('products/:id/control', [InventoryController, 'control'])
+    router.post('receipts', [InventoryController, 'receipts'])
+    router.post('adjustments', [InventoryController, 'adjustments'])
+    router.post('orders/:id/preview', [InventoryController, 'preview'])
+    router.get('movements', [InventoryController, 'movements'])
+  }).prefix('inventory').use([middleware.auth(), middleware.companyContext()])
 
   router.resource('orderpayments', OrderPaymentsController)
     .middleware('*', [
@@ -330,6 +343,9 @@ router.group(() => {
       middleware.auth(),
       middleware.companyContext(),
     ])
+
+  router.post('tables/:id/recover-availability', [TablesController, 'recoverAvailability'])
+    .middleware([middleware.auth(), middleware.companyContext()])
 
   router.put('tables/release/:id/:orderId', [TablesController, 'releaseTable'])
     .middleware([

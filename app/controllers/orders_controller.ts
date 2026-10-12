@@ -1,3 +1,5 @@
+import KitchenService from '#services/kitchen_service';
+import { KitchenOperationError } from '#services/kitchen_state';
 import Location from "#models/location";
 import CashRegisterSession from "#models/cash_registers_session";
 import Order from "#models/order";
@@ -7,6 +9,9 @@ import {
   updateOrderValidator,
 } from "#validators/order";
 import type { HttpContext } from "@adonisjs/core/http";
+import InventoryOrderService from '#services/inventory/inventory_order_service';
+import InventoryMutationService from '#services/inventory/inventory_mutation_service';
+import { InventoryError } from '#services/inventory/inventory_math';
 import db from "@adonisjs/lucid/services/db";
 import { DateTime } from "luxon";
 import OrderItem from "#models/order_item";
@@ -124,7 +129,8 @@ export default class OrdersController {
     }
   }
 
-  async store({
+  async store(ctx: HttpContext) {
+    const {
     request,
     response,
     auth,
@@ -135,13 +141,19 @@ export default class OrdersController {
     cashRecoveryAuthorizedUntil,
     locationId,
     cashTransactionTrx,
-  }: HttpContext) {
+    } = ctx;
     const trx = cashTransactionTrx || await db.transaction();
 
     try {
+      const previous = await InventoryMutationService.replay(ctx, trx);
+      if (previous) {
+        await trx.commit();
+        return response.created(previous);
+      }
       const payload = await request.validateUsing(
-        createOrderValidator(companyId, locationId!),
+        createOrderValidator(companyId, locationId!, trx),
       );
+      await InventoryMutationService.begin(ctx, trx);
       const {
         orderItems,
         paymentMethodId,
@@ -152,6 +164,7 @@ export default class OrdersController {
       } = payload;
 
       if (!cashRegisterSessionId) {
+        await trx.rollback();
         return response.status(400).json({
           message: "No se encontró una sesión de caja activa",
         });
@@ -351,6 +364,7 @@ export default class OrdersController {
         trx,
       );
 
+      await InventoryOrderService.apply(ctx, order, trx, 'sale');
       await trx.commit();
 
       // ✅ VALIDACIÓN: Solo emitir a cocina si la orden debe aparecer allí
@@ -437,7 +451,8 @@ export default class OrdersController {
 
       return response.created(completedOrder);
     } catch (error) {
-      await trx.rollback();
+      if (!trx.isCompleted) await trx.rollback();
+      if (error instanceof InventoryError) return response.status(error.status).send({ message: error.message, code: error.code });
 
       if (error.code === "ORDER_ITEM_PERSONALIZATION_INVALID") {
         return response.status(422).json({
@@ -502,7 +517,8 @@ export default class OrdersController {
     }
   }
 
-  async update({
+  async update(ctx: HttpContext) {
+    const {
     params,
     request,
     response,
@@ -515,17 +531,28 @@ export default class OrdersController {
     cashRecoveryIsActive,
     cashRecoveryAuthorizedUntil,
     cashTransactionTrx,
-  }: HttpContext) {
+    } = ctx;
     const MAX_RETRIES = cashTransactionTrx ? 1 : 3;
     const BASE_DELAY = 100; // milliseconds
 
+    try {
+      const previous = await InventoryMutationService.replay(ctx);
+      if (previous) return response.ok(previous);
+    } catch (error) {
+      if (error instanceof InventoryError) return response.status(error.status).send({ message: error.message, code: error.code });
+      throw error;
+    }
+
     const payload = await request.validateUsing(
-      updateOrderValidator(companyId, locationId!),
+      updateOrderValidator(companyId, locationId!, cashTransactionTrx),
     );
     const { orderItems, paymentMethodId, notesPayment, ...orderData } = payload;
+    if (orderData.status === 'cancelled') {
+      return response.conflict({ message: 'Usa Cancelar para revisar los productos que regresan.', code: 'INVENTORY_RETURN_REVIEW' });
+    }
 
     const productIds = [...new Set(orderItems.map((item) => item.productId))];
-    const products = await Product.query()
+    const products = await Product.query(cashTransactionTrx ? { client: cashTransactionTrx } : undefined)
       .whereIn("id", productIds)
       .where("company_id", companyId)
       .where("is_active", true)
@@ -561,6 +588,10 @@ export default class OrdersController {
           })
           .preload("waiter")
           .firstOrFail();
+
+        await InventoryOrderService.assertVersion(ctx, order);
+        await InventoryMutationService.begin(ctx, trx);
+        await order.load('orderItems', (q) => q.forUpdate().preload('product', (p) => p.preload('category')).preload('modifierSelections', (s) => s.forUpdate()));
 
         if (
           cashRegisterIsPreviousBusinessDay &&
@@ -869,6 +900,7 @@ export default class OrdersController {
           trx,
         );
 
+        await InventoryOrderService.apply(ctx, order, trx, 'edit', financialChange.toNumber());
         await trx.commit();
 
         // --- Preparar la respuesta ---
@@ -929,7 +961,8 @@ export default class OrdersController {
           financialChange: financialChange.toNumber(),
         });
       } catch (error) {
-        if (trx) await trx.rollback();
+        if (trx && !trx.isCompleted) await trx.rollback();
+        if (error instanceof InventoryError) return response.status(error.status).send({ message: error.message, code: error.code });
         // ... (resto del manejo de errores sin cambios)
         // const duration = Date.now() - startTime
         if (
@@ -993,7 +1026,8 @@ export default class OrdersController {
     });
   }
 
-  async cancelOrder({
+  async cancelOrder(ctx: HttpContext) {
+    const {
     params,
     request,
     response,
@@ -1006,17 +1040,23 @@ export default class OrdersController {
     cashRecoveryIsActive,
     cashRecoveryAuthorizedUntil,
     cashTransactionTrx,
-  }: HttpContext) {
+    } = ctx;
     const trx = cashTransactionTrx || await db.transaction();
     try {
+      const previous = await InventoryMutationService.replay(ctx, trx);
+      if (previous) {
+        await trx.commit();
+        return response.ok(previous);
+      }
       const payload = await request.validateUsing(
-        cancelOrderValidator(companyId),
+        cancelOrderValidator(companyId, trx),
       );
 
       const order = await Order.query({ client: trx })
         .where("id", params.id)
         .where("company_id", companyId)
         .where("location_id", locationId!)
+        .forUpdate()
         .preload("payments") // Cargar los pagos existentes
         .preload("orderItems", (query) =>
           query
@@ -1049,6 +1089,10 @@ export default class OrdersController {
         });
       }
 
+      await InventoryOrderService.assertVersion(ctx, order);
+      await InventoryMutationService.begin(ctx, trx);
+      await order.load('payments', (q) => q.forUpdate());
+      await order.load('orderItems', (q) => q.forUpdate().preload('product').preload('modifierSelections', (s) => s.forUpdate()));
       const amountAlreadyPaid = order.payments.reduce(
         (sum, payment) => sum.plus(payment.amount),
         new Decimal(0),
@@ -1074,7 +1118,7 @@ export default class OrdersController {
       let currentUserRoleCode: string | null = null;
 
       try {
-        await auth.user!.load("role");
+        await auth.user!.load("role", (query) => query.useTransaction(trx));
         currentUserRoleCode = auth.user!.role?.code || null;
       } catch {
         currentUserRoleCode = null;
@@ -1181,6 +1225,7 @@ export default class OrdersController {
         trx,
       );
 
+      await InventoryOrderService.apply(ctx, order, trx, 'return', amountAlreadyPaid.toNumber());
       await trx.commit();
 
       const roomName = `kitchen_room_${companyId}_${locationId}`;
@@ -1208,7 +1253,8 @@ export default class OrdersController {
         order,
       });
     } catch (error) {
-      await trx.rollback();
+      if (!trx.isCompleted) await trx.rollback();
+      if (error instanceof InventoryError) return response.status(error.status).send({ message: error.message, code: error.code });
       if (error.code === "E_ROW_NOT_FOUND") {
         return response.notFound({
           message: `La orden con ID ${params.id} no fue encontrada.`,
@@ -1235,8 +1281,20 @@ export default class OrdersController {
   ): Promise<void> {
     const currentItems = await OrderItem.query({ client: trx })
       .where("order_id", orderId)
-      .preload("modifierSelections", (query) => query.orderBy("display_order", "asc"));
+      .forUpdate()
+      .preload("modifierSelections", (query) => query.orderBy("display_order", "asc").forUpdate());
     const currentItemsMap = new Map(currentItems.map((item) => [item.id, item]));
+    // Preserve the original block and create a separate block for added units.
+    newOrderItems = newOrderItems.flatMap((item) => {
+      const current = item.orderItemId ? currentItemsMap.get(item.orderItemId) : undefined;
+      if (!current || item.quantity <= current.quantity) return [item];
+      return [{ ...item, quantity: current.quantity }, {
+        ...item, orderItemId: undefined, quantity: item.quantity - current.quantity,
+        modifierSelections: item.modifierSelections || current.modifierSelections.map((s) => ({
+          modifierGroupId: s.modifierGroupId!, modifierOptionId: s.modifierOptionId!, quantity: s.quantity,
+        })),
+      }];
+    });
     const requestIds = newOrderItems
       .map((item) => item.orderItemId)
       .filter((id): id is number => typeof id === "number");
@@ -1300,6 +1358,7 @@ export default class OrdersController {
           data: {
             orderId,
             productId: currentItem.productId,
+            ...InventoryOrderService.identity(currentItem, currentItem.modifierSelections),
             quantity: currentItem.quantity,
             unitPrice: currentItem.unitPrice,
             totalPrice: currentItem.totalPrice,
@@ -1337,6 +1396,18 @@ export default class OrdersController {
         continue;
       }
 
+      if (currentItem && InventoryOrderService.sameOptions(currentItem.modifierSelections, itemData.modifierSelections || currentItem.modifierSelections)) {
+        const total = personalizationService.calculatePersistedLineTotal(new Decimal(currentItem.unitPrice), itemData.quantity, currentItem.modifierSelections);
+        itemsToInsert.push({ quantity: itemData.quantity, data: {
+          orderId, productId: currentItem.productId, ...InventoryOrderService.identity(currentItem, currentItem.modifierSelections),
+          quantity: itemData.quantity, unitPrice: currentItem.unitPrice, totalPrice: total.toNumber(),
+          kitchenStatus: currentItem.kitchenStatus, kitchenStartedAt: currentItem.kitchenStartedAt,
+          kitchenReadyAt: currentItem.kitchenReadyAt, servedAt: currentItem.servedAt,
+          specialInstructions: currentItem.specialInstructions,
+        }, persistedSelections: currentItem.modifierSelections });
+        continue;
+      }
+
       const validatedSelections = await personalizationService.validate(
         companyId,
         itemData,
@@ -1344,7 +1415,7 @@ export default class OrdersController {
         Boolean(currentItem && currentItem.modifierSelections.length === 0),
       );
       const itemTotal = personalizationService.calculateLineTotal(
-        unitPrice,
+        currentItem ? new Decimal(currentItem.unitPrice) : unitPrice,
         itemData.quantity,
         validatedSelections,
       );
@@ -1354,7 +1425,8 @@ export default class OrdersController {
           orderId,
           productId: itemData.productId,
           quantity: itemData.quantity,
-          unitPrice: product.price,
+          ...InventoryOrderService.identity(currentItem, validatedSelections),
+          unitPrice: currentItem ? currentItem.unitPrice : product.price,
           totalPrice: itemTotal.toNumber(),
           kitchenStatus: "in_preparation",
           kitchenStartedAt: DateTime.now(),
@@ -1509,39 +1581,8 @@ export default class OrdersController {
   /**
    * Elimina (cancela) una orden.
    */
-  async destroy({ params, response, companyId }: HttpContext) {
-    // ... (sin cambios en este método)
-    try {
-      const order = await Order.query()
-        .where("id", params.id)
-        .where("company_id", companyId)
-        .firstOrFail();
-
-      if (order.status === "paid") {
-        return response.conflict({
-          message: "No se puede cancelar una orden ya pagada.",
-        });
-      }
-
-      order.status = "cancelled";
-      order.cancelledAt = DateTime.now();
-      await order.save();
-
-      return response.ok({
-        message: "La orden ha sido cancelada exitosamente.",
-        order,
-      });
-    } catch (error) {
-      if (error.code === "E_ROW_NOT_FOUND") {
-        return response.notFound({
-          message: `La orden con ID ${params.id} no fue encontrada.`,
-        });
-      }
-      return response.internalServerError({
-        message: "Ocurrió un error al cancelar la orden.",
-        error: error.message,
-      });
-    }
+  async destroy({ response }: HttpContext) {
+    return response.conflict({ message: 'Usa Cancelar comanda para revisar los productos que regresan al inventario.', code: 'INVENTORY_UPDATE_REQUIRED' });
   }
 
   /**
@@ -1591,6 +1632,7 @@ export default class OrdersController {
           {
             orderId,
             productId: itemToAdd.productId,
+            ...InventoryOrderService.identity(undefined, modifierSelections),
             quantity: itemToAdd.quantity,
             // Guardamos el precio unitario del producto en ese momento.
             unitPrice: productData.price,
@@ -1789,10 +1831,10 @@ export default class OrdersController {
     locationId,
     cashRegisterSessionId,
   }: HttpContext) {
-    if (!locationId) {
+    if (!locationId || !cashRegisterSessionId) {
       return response.badRequest({
         message:
-          "El ID de la sucursal es requerido para consultar las órdenes de cocina.",
+          "La sede y la caja abierta son necesarias para consultar cocina.",
       });
     }
 
@@ -1802,13 +1844,21 @@ export default class OrdersController {
         // Filtra por la sucursal actual
         .where("location_id", locationId)
         .where("cash_register_session_id", cashRegisterSessionId!)
-        .whereNotIn("status", ["cancelled"])
+        .whereNotIn("status", ["cancelled", "served"])
+        .where("is_served", false).whereNull("served_at")
+        .where("is_ready_to_serve", false)
+        .where((query) => {
+          query.whereNot("status", "paid").orWhere((prepaid) => {
+            prepaid.where("status", "paid").where((flags) => {
+              flags.where("is_prepaid", true).orWhere("is_advance_payment", true);
+            });
+          });
+        })
         // La magia está aquí: whereHas asegura que la orden tenga al menos un
         // item que cumpla la condición del sub-query.
         .whereHas("orderItems", (query: any) => {
           query
-            .where("kitchen_status", "in_preparation")
-            .orWhere("kitchen_status", "pending");
+            .whereIn("kitchen_status", ["in_preparation", "pending"]);
         })
         .where((mainQuery: any) => {
           mainQuery
@@ -1859,6 +1909,9 @@ export default class OrdersController {
           "cancelledAt",
           "createdAt",
           "updatedAt",
+          "status",
+          "isPrepaid",
+          "isAdvancePayment",
           "isReadyToServe",
           "isServed",
           "wasModified",
@@ -1936,230 +1989,61 @@ export default class OrdersController {
    * @param param0
    * @returns
    */
-  public async markAsReady({
-    params,
-    response,
-    companyId,
-    locationId,
-  }: HttpContext) {
-    const trx = await db.transaction();
+  public async markAsReady({ params, response, companyId, locationId, auth }: HttpContext) {
+    if (!locationId) return response.badRequest({ message: "Selecciona una sede para continuar." });
     try {
-      const order = await Order.query({ client: trx })
-        .where("company_id", companyId)
-        .where("id", params.id)
-        .preload("waiter")
-        .preload("orderItems") // Precargamos los items para las validaciones
-        .first();
-
-      // Si la orden no existe, arrojar un error 404
-      if (!order) {
-        return response.notFound({
-          message: `La orden con ID #${params.id} no fue encontrada.`,
-        });
-      }
-
-      const { orderItems } = order;
-
-      // 3. VALIDACIÓN: Verificar si todos los items ya están listos
-      const areAllItemsReady = orderItems.every(
-        (item) =>
-          item.kitchenStatus === "ready" || item.kitchenStatus === "served",
-      );
-      if (areAllItemsReady) {
-        // Usamos el código 409 (Conflict) porque la acción no se puede realizar
-        // debido al estado actual del recurso.
-        return response.conflict({
-          message: `La orden #${order.id} ya tiene todos sus items listos.`,
-        });
-      }
-
-      // 4. VALIDACIÓN: Verificar si algún item ya fue servido
-      const isAnyItemServed = orderItems.some(
-        (item) => item.kitchenStatus === "served",
-      );
-      if (
-        isAnyItemServed &&
-        orderItems.every((item) => item.kitchenStatus === "served")
-      ) {
-        return response.conflict({
-          message: `La orden #${order.id} no se puede modificar porque ya ha sido servida.`,
-        });
-      }
-
-      // 5. ACTUALIZACIÓN: Cambiar el estado de los items y de la orden
-
-      // Filtramos los IDs de los items que están 'in_preparation' para actualizarlos
-      const itemsToUpdateIds = orderItems
-        .filter(
-          (item) =>
-            item.kitchenStatus === "in_preparation" ||
-            item.kitchenStatus === "pending",
-        )
-        .map((item) => item.id);
-
-      // Si no hay items para actualizar, no tiene sentido continuar
-      if (itemsToUpdateIds.length === 0) {
-        return response.conflict({
-          message: `La orden #${order.id} no tiene items pendientes o en preparación para marcar como listos.`,
-        });
-      }
-
-      // Actualizar solo los items necesarios
-      await OrderItem.query({ client: trx })
-        .whereIn("id", itemsToUpdateIds)
-        .update({ kitchen_status: "ready" });
-
-      // Actualizar la orden principal
-      order.useTransaction(trx); // Asegurarse de que esta instancia de orden use la transacción
-      // order.status = 'ready' // NO ACTUALIZAR EL ESTADO DE LA ORDEN, SOLO EL DE LOS HIJOS
-      order.isReadyToServe = true; // Como solicitaste
-      await order.save();
-
-      // 6. Si todo salió bien, confirmar la transacción
-      await trx.commit();
-
-      // 7. Preparar y emitir el evento de socket con los datos actualizados
-      const updatedOrderToEmit = await Order.query()
-        .where("id", order.id)
-        .preload("orderItems", (q) =>
-          q
-            .preload("product", (p) => p.preload("category"))
-            .preload("modifierSelections", (selectionQuery) =>
-              selectionQuery.orderBy("display_order", "asc"),
-            ),
-        )
-        .preload("waiter")
-        .preload("table")
-        .firstOrFail();
-
+      await KitchenService.dispatch({ companyId, locationId }, Number(params.id));
+      const updatedOrder = await Order.query()
+        .where("company_id", companyId).where("location_id", locationId).where("id", params.id)
+        .preload("orderItems", (q) => q
+          .preload("product", (p) => p.preload("category"))
+          .preload("modifierSelections", (q) => q.orderBy("display_order", "asc")))
+        .preload("waiter").preload("table").firstOrFail();
       const roomName = `kitchen_room_${companyId}_${locationId}`;
-      io.to(roomName).emit("order_is_ready", updatedOrderToEmit);
-      io.to(roomName).emit(`order_removed`, updatedOrderToEmit.id);
-
-      // --> 2. AÑADE EL CÓDIGO PARA ENVIAR LA NOTIFICACIÓN PUSH <--
-      if (locationId) {
-        const title = `Pedido #${order.orderNumber} listo para servir`;
-        const body = "Pedido listo para servir.";
-
-        // Llamamos al método que creaste en tu servicio
-        // const firebaseService = new FirebaseService()
-        await firebaseService.sendPushNotification(
-          locationId,
-          title,
-          body,
-          { orderId: order.id.toString() }, // Enviamos datos adicionales si es necesario
-          ["waiter"],
-        );
+      io.to(roomName).emit("order_is_ready", updatedOrder);
+      io.to(roomName).emit("order_removed", updatedOrder.id);
+      console.info('[KITCHEN] dispatched', JSON.stringify({ companyId, locationId, orderId: updatedOrder.id, userId: auth.user?.id }));
+      // Dispatch is committed; a push failure must not report a failed dispatch.
+      try {
+        await firebaseService.sendPushNotification(locationId,
+          `Pedido #${updatedOrder.orderNumber} listo para servir`, "Pedido listo para servir.",
+          { orderId: updatedOrder.id.toString() }, ["waiter"]);
+      } catch (error) {
+        console.error('[KITCHEN] push_failed', { companyId, locationId, orderId: updatedOrder.id }, error);
       }
-
-      console.log(
-        `📡 Evento 'order_is_ready', 'order_removed' emitido para la orden #${order.id}`,
-      );
-
-      return response.ok(updatedOrderToEmit);
+      return response.ok(updatedOrder);
     } catch (error) {
-      // Si algo falla, revertir todos los cambios en la base de datos
-      await trx.rollback();
-      console.error("Error al marcar la orden como lista:", error);
-      return response.internalServerError({
-        message: "Ocurrió un error interno al procesar la solicitud.",
-        error: error.message,
-      });
+      if (error instanceof KitchenOperationError) {
+        console.warn('[KITCHEN] dispatch_rejected', JSON.stringify({ companyId, locationId, orderId: params.id, userId: auth.user?.id, code: error.code }));
+        return response.status(error.status).send({ message: error.message, code: error.code });
+      }
+      console.error("Error al despachar la comanda:", error);
+      return response.internalServerError({ message: "No se pudo despachar la comanda." });
     }
   }
 
-  public async markAsServed({
-    params,
-    response,
-    companyId,
-    locationId,
-  }: HttpContext) {
-    const trx = await db.transaction();
+  public async markAsServed({ params, response, companyId, locationId, auth }: HttpContext) {
+    if (!locationId) return response.badRequest({ message: "Selecciona una sede para continuar." });
     try {
-      const order = await Order.query({ client: trx })
-        .where("company_id", companyId)
-        .where("id", params.id)
-        .preload("waiter")
-        .preload("orderItems", (q) =>
-          q
-            .preload("product", (p) => p.preload("category"))
-            .preload("modifierSelections", (selectionQuery) =>
-              selectionQuery.orderBy("display_order", "asc"),
-            ),
-        )
-        .first();
-
-      if (!order) {
-        return response.notFound({
-          message: `La orden con ID #${params.id} no fue encontrada.`,
-        });
-      }
-
-      const { orderItems } = order;
-
-      // Validar si ya fue servida
-      const isOrderAlreadyServed = orderItems.every(
-        (item) => item.kitchenStatus === "served",
-      );
-      if (isOrderAlreadyServed) {
-        return response.conflict({
-          message: `La orden #${order.id} ya fue servida.`,
-        });
-      }
-
-      // Validar si todos están listos
-      const areAllItemsReady = orderItems.every(
-        (item) =>
-          item.kitchenStatus === "ready" || item.kitchenStatus === "served",
-      );
-      if (!areAllItemsReady) {
-        return response.conflict({
-          message: `La orden #${order.id} no puede servirse porque aún hay items en preparación.`,
-        });
-      }
-
-      // Actualizar items -> de ready a served
-      await OrderItem.query({ client: trx })
-        .where("order_id", order.id)
-        .update({ kitchen_status: "served" });
-
-      // Actualizar orden principal
-      order.useTransaction(trx);
-      order.servedAt = DateTime.now();
-      order.isServed = true; // asegúrate que exista esta columna en el schema
-      await order.save();
-
-      await trx.commit();
-
-      // Emitir al socket la orden actualizada
-      const updatedOrderToEmit = await Order.query()
-        .where("id", order.id)
-        .preload("orderItems", (q) =>
-          q
-            .preload("product", (p) => p.preload("category"))
-            .preload("modifierSelections", (selectionQuery) =>
-              selectionQuery.orderBy("display_order", "asc"),
-            ),
-        )
-        .preload("waiter")
-        .preload("table")
-        .firstOrFail();
-
+      await KitchenService.serve({ companyId, locationId }, Number(params.id));
+      const updatedOrder = await Order.query()
+        .where("company_id", companyId).where("location_id", locationId).where("id", params.id)
+        .preload("orderItems", (q) => q
+          .preload("product", (p) => p.preload("category"))
+          .preload("modifierSelections", (q) => q.orderBy("display_order", "asc")))
+        .preload("waiter").preload("table").firstOrFail();
       const roomName = `kitchen_room_${companyId}_${locationId}`;
-      io.to(roomName).emit("order_is_served", updatedOrderToEmit);
-
-      console.log(
-        `📡 Evento 'order_is_served' emitido para la orden #${order.id}`,
-      );
-
-      return response.ok(updatedOrderToEmit);
+      io.to(roomName).emit("order_is_served", updatedOrder);
+      io.to(roomName).emit("order_removed", updatedOrder.id);
+      console.info('[KITCHEN] served', JSON.stringify({ companyId, locationId, orderId: updatedOrder.id, userId: auth.user?.id }));
+      return response.ok(updatedOrder);
     } catch (error) {
-      await trx.rollback();
-      console.error("Error al marcar la orden como servida:", error);
-      return response.internalServerError({
-        message: "Ocurrió un error interno al procesar la solicitud.",
-        error: error.message,
-      });
+      if (error instanceof KitchenOperationError) {
+        console.warn('[KITCHEN] serve_rejected', JSON.stringify({ companyId, locationId, orderId: params.id, userId: auth.user?.id, code: error.code }));
+        return response.status(error.status).send({ message: error.message, code: error.code });
+      }
+      console.error("Error al entregar la comanda:", error);
+      return response.internalServerError({ message: "No se pudo registrar la entrega de la comanda." });
     }
   }
 }

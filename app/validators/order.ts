@@ -1,4 +1,5 @@
 import vine from "@vinejs/vine";
+import type { TransactionClientContract } from "@adonisjs/lucid/types/database";
 
 const modifierSelectionsSchema = vine
   .array(
@@ -14,7 +15,7 @@ const modifierSelectionsSchema = vine
  * Validador para la creación de una orden.
  * Los campos son mayormente requeridos.
  */
-export const createOrderValidator = (companyId: number, locationId: number) =>
+export const createOrderValidator = (companyId: number, locationId: number, trx?: TransactionClientContract) =>
   vine.compile(
     vine.object({
       // El tableId es opcional en el modelo, pero debe existir en la DB si se provee.
@@ -26,7 +27,7 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
         .exists(async (db, value) => {
           // Lógica de negocio: Asegurarse de que la mesa existe.
           // En un escenario real, también validarías que pertenezca a la companyId actual.
-          return await db
+          return await (trx || db)
             .from("tables")
             .where("id", value)
             .where("company_id", companyId)
@@ -42,7 +43,7 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
       paymentMethodId: vine
         .number()
         .exists(async (db, value) => {
-          const result = await db
+          const result = await (trx || db)
             .from("payment_methods")
             .where("id", value)
             .where("company_id", companyId)
@@ -66,7 +67,7 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
         .array(
           vine.object({
             paymentMethodId: vine.number().exists(async (db, value) => {
-              const result = await db
+              const result = await (trx || db)
                 .from("payment_methods")
                 .where("id", value)
                 .where("company_id", companyId)
@@ -98,7 +99,7 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
         .array(
           vine.object({
             productId: vine.number().exists(async (db, value) => {
-              return await db
+              return await (trx || db)
                 .from("products")
                 .where("id", value)
                 .where("company_id", companyId)
@@ -124,14 +125,14 @@ export const createOrderValidator = (companyId: number, locationId: number) =>
  * La mayoría de los campos son opcionales, ya que solo se actualiza
  * lo que cambia (ej. solo el estado).
  */
-export const updateOrderValidator = (companyId: number, locationId: number) =>
+export const updateOrderValidator = (companyId: number, locationId: number, trx?: TransactionClientContract) =>
   vine.compile(
     vine.object({
       // Hacemos todos los campos opcionales para la actualización
       tableId: vine
         .number()
         .exists(async (db, value) => {
-          return await db
+          return await (trx || db)
             .from("tables")
             .where("id", value)
             .where("company_id", companyId)
@@ -153,7 +154,7 @@ export const updateOrderValidator = (companyId: number, locationId: number) =>
         vine.object({
           orderItemId: vine.number().positive().optional(),
           productId: vine.number().exists(async (db, value) => {
-            return await db
+            return await (trx || db)
               .from("products")
               .where("id", value)
               .where("company_id", companyId)
@@ -167,7 +168,7 @@ export const updateOrderValidator = (companyId: number, locationId: number) =>
       paymentMethodId: vine
         .number()
         .exists(async (db, value) => {
-          const result = await db
+          const result = await (trx || db)
             .from("payment_methods")
             .where("id", value)
             .where("company_id", companyId)
@@ -214,14 +215,14 @@ export const updateOrderValidator = (companyId: number, locationId: number) =>
  * La mayoría de los campos son opcionales, ya que solo se actualiza
  * lo que cambia (ej. solo el estado).
  */
-export const cancelOrderValidator = (companyId: number) =>
+export const cancelOrderValidator = (companyId: number, trx?: TransactionClientContract) =>
   vine.compile(
     vine.object({
       // El método de pago es opcional, pero podría ser necesario para el reembolso
       paymentMethodId: vine
         .number()
         .exists(async (db, value) => {
-          return await db
+          return await (trx || db)
             .from("payment_methods")
             .where("id", value)
             .where("company_id", companyId)

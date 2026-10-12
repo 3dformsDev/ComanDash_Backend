@@ -44,6 +44,7 @@ router.use([
 export const middleware = router.named({
   // socketAuth: () => import('#middleware/socket_auth_middleware'),
   auth: () => import('#middleware/auth_middleware'),
+  inventoryMutation: () => import('#middleware/inventory_mutation_middleware'),
   permission: () => import('#middleware/permission_middleware'),
   companyContext: () => import('#middleware/company_context_middleware'),
   permissionAll: () => import('#middleware/permission_all_middleware'),
